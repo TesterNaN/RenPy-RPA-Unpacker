@@ -488,15 +488,52 @@ def _indent(text: str, prefix: str = "    ") -> str:
     return "\n".join(prefix + line if line else line for line in text.splitlines())
 
 
-def _emit_definition(name: str, node: ast.stmt) -> str:
-    """Unparse a definition for embedding inside a function, with the AST link."""
+def _prepare_definition(node: ast.stmt) -> str:
+    """Unparse a definition, dropping the source line numbers it carries."""
     ast.fix_missing_locations(node)
     # Line numbers in the copy describe THIS file, so drop the original link.
     try:
         ast.increment_lineno(node, -node.lineno)
     except Exception:  # pragma: no cover - defensive
         pass
-    return _indent(ast.unparse(node))
+    return ast.unparse(node)
+
+
+def _emit_definition(name: str, node: ast.stmt) -> str:
+    """Unparse a definition for embedding inside a function, with the AST link."""
+    return _indent(_prepare_definition(node))
+
+
+def _emit_module_definition(name: str, node: ast.stmt) -> str:
+    """Unparse a definition for the generated module's top level."""
+    return _prepare_definition(node)
+
+
+def _global_declared_names(tree: ast.Module) -> frozenset[str]:
+    """Names that some function in *tree* declares ``global``.
+
+    These have to live in the generated module's own globals.  A ``global``
+    statement inside an extracted function resolves against the *module*
+    namespace, while every other definition is emitted as a local of ``build()``
+    -- a scope that statement cannot reach.  Emitting the initialiser next to the
+    function therefore produces:
+
+        def build():
+            old_config_archives = None          # a local of build()
+
+            def index_archives():
+                global old_config_archives      # looks in the module globals
+                if old_config_archives == ...:  # NameError
+                    return
+
+    which is issue #1 with a different cause: the old hand-assembled ``core.py``
+    dropped the initialiser entirely, this one emitted it one scope too deep.
+    """
+    names: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Global):
+            names.update(node.names)
+    return frozenset(names)
 
 
 def _emit_shim(name: str, body: str) -> str:
@@ -524,6 +561,11 @@ class _Extractor:
         self.shim_blocks: list[str] = []
         #: Extracted-definition source blocks, in dependency order.
         self.definition_blocks: list[str] = []
+        #: Names declared ``global`` somewhere in the loader.  Their initialisers
+        #: go to the generated module's top level, not inside ``build()``.
+        self.global_names = _global_declared_names(index.tree)
+        #: Blocks emitted at the generated module's top level.
+        self.module_blocks: list[str] = []
         self.emitted_assignments: set[int] = set()
         self.generated: list[str] = []
         self.shims: list[str] = []
@@ -661,7 +703,16 @@ class _Extractor:
 
         for dependency in sorted(assignment.dependencies):
             self._want(dependency, required=False, chain=[name, dependency])
-        self.definition_blocks.append(_emit_definition(name, assignment.node) + "\n")
+
+        # A name some function reads via ``global`` before writing it must already
+        # exist in the generated module's globals, so its initialiser is hoisted
+        # out of ``build()``.  Only when the initialiser stands alone: at module
+        # level nothing else has been defined yet, so one that calls into the
+        # extracted code would not resolve.
+        if name in self.global_names and not assignment.dependencies:
+            self.module_blocks.append(_emit_module_definition(name, assignment.node) + "\n")
+        else:
+            self.definition_blocks.append(_emit_definition(name, assignment.node) + "\n")
 
     def _dependencies(self, node: ast.stmt) -> list[str]:
         return sorted(_collect_load_names(node))
@@ -687,6 +738,18 @@ class _Extractor:
 
         for name in sorted(self._imports_needed):
             lines.append(f"import {name}")
+
+        if self.module_blocks:
+            lines.append("")
+            lines.append("")
+            lines.append(
+                "# Module-level state.  Functions below declare these `global`, and a"
+            )
+            lines.append(
+                "# `global` statement resolves against this namespace -- not against"
+            )
+            lines.append("# build()'s locals, where everything else is emitted.")
+            lines.extend(block.rstrip("\n") for block in self.module_blocks)
 
         lines.extend(
             [

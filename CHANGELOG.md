@@ -2,6 +2,23 @@
 
 版本号以 `pyproject.toml` 里的 `version` 为准，对应的 git tag 是 `v<版本号>`。
 
+## 2.0.1
+
+### 修复
+
+- **被 `global` 声明的名字被输出到了错误的作用域**（[#1](https://github.com/TesterNaN/RenPy-RPA-Unpacker/issues/1)）。
+
+  生成模块把所有定义都放进 `build()` 函数体里，而 `global X` 解析的是**模块**命名空间。
+  于是当 loader 里某个函数先读后写某个全局名时，它的模块级初始化语句虽然被正确提取了，
+  却被输出成 `build()` 的局部变量——函数第一次读它照样 `NameError`。这类名字现在被提升到
+  生成模块的顶层，语义与 Ren'Py 一致（第一次调用重新索引，第二次短路返回）。
+
+  症状和 #1 报告的老版本 bug 一模一样，但根因不同：老版本是手工切代码片段时漏掉了初始化
+  语句，新版本是把它输出深了一层。报告者的 loader 里 `index_archives()` 本身就用这个形状，
+  所以必炸；本机 5 个真实游戏的 loader 里用 `global` 的四个函数
+  （`auto_init`、`auto_quit`、`auto_thread_function`、`check_autoreload`）都在提取闭包之外，
+  因此一直没被触发。
+
 ## 2.0.0
 
 **v2 是一次重写，不是修补：解包用的代码换了来源。**

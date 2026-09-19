@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "renpy-rpa-unpacker"
-version = "2.0.0"
+version = "2.0.1"
 description = "Unpack Ren'Py .rpa archives using the game's own loader -- static AST extraction by default, the game's own runtime when that is not enough."
 readme = "README.md"
 requires-python = ">=3.9"

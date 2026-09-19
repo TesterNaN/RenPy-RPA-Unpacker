@@ -298,6 +298,75 @@ class TestExtractionAgainstRealLoader(unittest.TestCase):
             warnings.simplefilter("error")
             compile(self.result.source, "<generated>", "exec")
 
+    def test_global_state_is_hoisted_out_of_build(self):
+        """Issue #1, re-created: a ``global`` read before any write must not break.
+
+        The reporter's ``loader.py`` had ``old_config_archives = None`` at module
+        level and an ``index_archives()`` that read it before writing it::
+
+            def index_archives():
+                global old_config_archives
+                if old_config_archives == renpy.config.archives:
+                    return
+                old_config_archives = list(renpy.config.archives)
+
+        The old hand-assembled ``core.py`` dropped the initialiser.  The AST
+        extractor found it -- and emitted it as a local of ``build()``, one scope
+        too deep: a ``global`` statement resolves against the *module* namespace,
+        so the copy raised the very same NameError.  Stock 8.5.2 never shows this
+        because the only functions there that use ``global`` (``auto_init``,
+        ``auto_quit``, ``auto_thread_function``, ``check_autoreload``) fall outside
+        the readers' dependency closure.
+        """
+        probe = (
+            "\n\nold_config_archives = None\n\n\n"
+            "def _reindex_probe():\n"
+            "    global old_config_archives\n"
+            "    if old_config_archives == renpy.config.archives:\n"
+            "        return False\n"
+            "    old_config_archives = list(renpy.config.archives)\n"
+            "    return True\n"
+        )
+        result = extract_module(
+            self.source + probe,
+            filename=str(self.loader),
+            required=(*REQUIRED, "_reindex_probe"),
+            fallbacks=FALLBACKS,
+            forced_shims=_fallbacks.FORCED_SHIMS,
+        )
+        self.assertIn("_reindex_probe", result.generated_names)
+
+        # The initialiser must be a module-level statement, not a build() local.
+        module_level = [
+            target.id
+            for node in ast.parse(result.source).body
+            if isinstance(node, ast.Assign)
+            for target in node.targets
+            if isinstance(target, ast.Name)
+        ]
+        self.assertIn("old_config_archives", module_level)
+
+        # And the recovered function must actually work, twice: the first call
+        # re-indexes, the second short-circuits -- Ren'Py's own semantics.
+        generated: dict = {}
+        exec(compile(result.source, "<generated>", "exec"), generated)
+        namespace = generated["build"]()
+        first = namespace["_reindex_probe"]()
+        second = namespace["_reindex_probe"]()
+        self.assertTrue(first)
+        self.assertFalse(second)
+
+    def test_global_declared_names_are_collected(self):
+        from renpy_unpack.ast_extract import _global_declared_names
+
+        tree = ast.parse(
+            "a = 1\nb = 2\n\n"
+            "def f():\n    global a\n    return a\n\n"
+            "def g():\n    global a, b\n    return a + b\n"
+        )
+        self.assertEqual(_global_declared_names(tree), frozenset({"a", "b"}))
+        self.assertEqual(_global_declared_names(ast.parse("c = 3\n")), frozenset())
+
 
 class TestExtractionFallbacks(unittest.TestCase):
     """A loader.py missing a piece degrades to a shim, and says so."""
