@@ -1,0 +1,31 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.eggs/
+
+# Test scratch.  The suite deliberately keeps it next to the tests instead of in
+# the system temp directory (see tests/test_support.py).
+.test-scratch/
+.buildtmp/
+
+# A Ren'Py loader.py dropped in to run the full suite.  Never commit it: it is
+# Ren'Py's code, not this project's, and it is found automatically when the
+# machine has an SDK installed (see sdk_loader() in tests/test_support.py).
+/renpy/
+/vendor/
+
+# Extraction output.  `extracted_files/` is the tool's default destination, and
+# `_unpack_out/` is what the standalone selfextract.rpy writes.
+extracted/
+extracted_files/
+_unpack_out/
+
+# Editors and operating systems
+.vscode/
+.idea/
+*.swp
+Thumbs.db
+desktop.ini

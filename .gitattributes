@@ -1,0 +1,16 @@
+# Normalise to LF in the repository and in every checkout.  Without this a Windows
+# git defaults to core.autocrlf=true, which rewrites every line ending on checkout
+# and turns a one-line edit into a whole-file diff.
+* text=auto eol=lf
+
+# Nothing binary is committed today, but these would be corrupted by text handling
+# if they ever are.
+*.png binary
+*.jpg binary
+*.webp binary
+*.ogg binary
+*.rpa binary
+*.rpi binary
+*.rpyc binary
+*.dll binary
+*.exe binary

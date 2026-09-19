@@ -1,0 +1,40 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "renpy-rpa-unpacker"
+version = "2.0.0"
+description = "Unpack Ren'Py .rpa archives using the game's own loader -- static AST extraction by default, the game's own runtime when that is not enough."
+readme = "README.md"
+requires-python = ">=3.9"
+license = { text = "GPL-3.0-or-later" }
+authors = [{ name = "TesterNaN" }]
+keywords = ["renpy", "rpa", "unpack", "extract", "archive", "visual-novel"]
+classifiers = [
+    "Development Status :: 5 - Production/Stable",
+    "Environment :: Console",
+    "Intended Audience :: End Users/Desktop",
+    "License :: OSI Approved :: GNU General Public License v3 or later (GPLv3+)",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: System :: Archiving",
+    "Topic :: Utilities",
+]
+dependencies = []
+
+[project.scripts]
+renpy-unpack = "renpy_unpack.core:main"
+
+[project.urls]
+Homepage = "https://github.com/TesterNaN/RenPy-RPA-Unpacker"
+Source = "https://github.com/TesterNaN/RenPy-RPA-Unpacker"
+Issues = "https://github.com/TesterNaN/RenPy-RPA-Unpacker/issues"
+
+[tool.setuptools]
+packages = ["renpy_unpack"]
