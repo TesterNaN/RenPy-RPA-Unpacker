@@ -9,6 +9,7 @@ the trip.
 
 from __future__ import annotations
 
+import ast
 import io
 import unittest
 from pathlib import Path
@@ -29,6 +30,7 @@ from renpy_unpack.core import (  # noqa: E402
 from rpa_factory import (  # noqa: E402
     DISGUISED_LOADER,
     OBFUSCATED_LOADER,
+    OLD_STYLE_LOADER,
     write_disguised_dll,
     write_fake_system_dll,
     write_obfuscated_rpa3,
@@ -978,6 +980,79 @@ class TestIncludeLoose(ScratchCase):
     def test_unparseable_source_raises_a_clear_error(self):
         with self.assertRaises(UnpackError):
             parse_loader_source("def broken(:\n", "loader.py")
+
+
+class TestOldStyleLoader(ScratchCase):
+    """Ren'Py 8.3.x differences, each of which broke the reader on a real game.
+
+    Found by running against a 8.3.4 release whose archives are disguised as
+    ``.blend`` files.  8.5.2 -- all five earlier samples -- hides every one of
+    these, which is why they went unnoticed: its registry is an object with
+    ``exts``/``peek``, it has ``arc_files``, its ``index_archives()`` calls
+    ``archives.clear()``, and its loader does not import ``unicode``.
+    """
+
+    def make_game(self) -> Path:
+        root = self.path("OldStyle")
+        (root / "game").mkdir(parents=True)
+        (root / "renpy").mkdir(parents=True)
+        (root / "renpy" / "loader.py").write_text(OLD_STYLE_LOADER, encoding="utf-8")
+        write_rpa3(
+            root / "game" / "archive.rpa",
+            {
+                "rpy/script.rpy": b"label start:\n    return\n",
+                "images/a.png": b"\x89PNG\r\n\x1a\n",
+            },
+        )
+        return root
+
+    def test_archives_are_indexed_through_config_archives(self):
+        """The end-to-end effect of all four differences at once.
+
+        Zero entries was the symptom on the real game: with no ``arc_files`` the
+        reader has to name archives in ``renpy.config.archives``, and because the
+        loader *rebinds* ``archives`` rather than clearing it, the populated list
+        is a different object from the one ``build()`` returned.
+        """
+        root = self.make_game()
+        unpacker = Unpacker(root, jobs=1, progress=False)
+        unpacker.discover()
+        unpacker.load_reader()
+
+        self.assertEqual(
+            sorted(entry.name for entry in unpacker.entries),
+            ["images/a.png", "rpy/script.rpy"],
+        )
+
+    def test_compat_names_are_shimmed_rather_than_imported(self):
+        """`from renpy.compat import unicode` used to become `import unicode`."""
+        root = self.make_game()
+        unpacker = Unpacker(root, jobs=1, progress=False)
+        unpacker.discover()
+        result = unpacker.load_reader()
+
+        self.assertIn("unicode", result.shim_names)
+        self.assertNotIn("import unicode", result.source)
+        # Only real modules are imported as modules.
+        generated = ast.parse(result.source)
+        imported = sorted(
+            alias.name
+            for node in generated.body
+            if isinstance(node, ast.Import)
+            for alias in node.names
+        )
+        self.assertEqual(imported, ["io", "os", "zlib"])
+
+    def test_plain_list_registry_is_accepted(self):
+        """8.3.x keeps `archive_handlers` as a list, with no exts/peek to clear."""
+        root = self.make_game()
+        unpacker = Unpacker(root, jobs=1, progress=False)
+        unpacker.discover()
+        unpacker.load_reader()
+
+        registry = unpacker.reader.namespace["archive_handlers"]
+        self.assertIsInstance(registry, list)
+        self.assertTrue(registry)
 
 
 if __name__ == "__main__":

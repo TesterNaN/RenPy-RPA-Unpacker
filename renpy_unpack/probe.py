@@ -184,14 +184,38 @@ def _loader_is_ready() -> bool:
     return loader is not None and hasattr(loader, "archive_handlers")
 
 
+def _declared_extensions(loader) -> list[str]:
+    """The archive extensions the loader's own handlers accept.
+
+    Newer Ren'Py keeps a registry object with an ``exts`` map keyed by extension;
+    8.3.x keeps a plain list of handler classes.  Both are asked rather than
+    guessing, because a hardcoded ``*.rpa`` glob is wrong for exactly the reason
+    this tool exists -- one real game calls its archives ``.blend``.
+    """
+    handlers = getattr(loader, "archive_handlers", None)
+
+    mapping = getattr(handlers, "exts", None)
+    if mapping is not None:
+        return list(mapping.keys())
+
+    found: list[str] = []
+    for handler in handlers or []:
+        try:
+            for extension in handler.get_supported_extensions():
+                if extension not in found:
+                    found.append(extension)
+        except Exception:
+            continue
+    return found
+
+
 def _index(game: Path):
     """Make sure the archives are indexed, using the loader's own extension list.
 
-    ``arc_files`` is normally filled by Ren'Py's directory scan, which asks each
-    handler for ``get_supported_extensions()``.  When it is empty we have to supply
-    the entries ourselves -- and doing that with a hardcoded ``*.rpa`` glob is wrong
-    for exactly the reason this tool exists: one real game calls its archives
-    ``.dll``, so a hardcoded scan finds nothing and reports zero entries.
+    ``arc_files`` is normally filled by Ren'Py's directory scan.  When it is empty
+    we have to supply the entries ourselves -- and doing that with a hardcoded
+    ``*.rpa`` glob is wrong for exactly the reason this tool exists: one real game
+    calls its archives ``.dll``, another ``.blend``.
 
     The handler registry is the authority, and it is live in this process.
     """
@@ -200,13 +224,35 @@ def _index(game: Path):
     if loader.archives:
         return loader
 
-    extensions: list[str] = []
-    # `exts` maps extension -> candidate handlers; its keys are what the handlers
-    # actually accept, so it is the authority rather than a hardcoded list.
-    try:
-        extensions = list(loader.archive_handlers.exts.keys())
-    except AttributeError:
-        extensions = [".rpa", ".rpi"]
+    extensions = _declared_extensions(loader) or [".rpa", ".rpi"]
+
+    # Ren'Py 8.3.x has no ``arc_files`` at all: ``index_archives()`` walks
+    # ``renpy.config.archives`` and probes each prefix against the handlers'
+    # extensions itself.  Nothing has filled that list in yet -- the game's
+    # options.rpy has not run, because we stopped before script loading -- so it
+    # has to be built from the directory scan here instead.
+    if not hasattr(loader, "arc_files"):
+        import renpy
+
+        # That path resolves every archive through transfn(), which joins
+        # basedir and searchpath -- and bootstrap has not set either yet, because
+        # we stopped at the loader import.  Leaving them empty does not raise:
+        # index_archives() wraps the resolution in `except Exception: continue`,
+        # so the whole thing silently indexes nothing.
+        if not getattr(renpy.config, "basedir", ""):
+            renpy.config.basedir = str(game)
+        if not getattr(renpy.config, "searchpath", None):
+            renpy.config.searchpath = ["game"]
+
+        prefixes: list[str] = []
+        for extension in extensions:
+            for archive in sorted(game.glob(f"game/*{extension}")):
+                prefix = archive.name[: -len(extension)]
+                if prefix not in prefixes:
+                    prefixes.append(prefix)
+        renpy.config.archives = prefixes
+        loader.index_archives()
+        return loader
 
     loader.arc_files[:] = []
     for extension in extensions:

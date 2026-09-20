@@ -2,6 +2,47 @@
 
 版本号以 `pyproject.toml` 里的 `version` 为准，对应的 git tag 是 `v<版本号>`。
 
+## 2.0.2
+
+**支持 Ren'Py 8.3.x 的 loader。** 在游戏 `skyblue`（8.3.4，存档伪装成 `.blend`、
+魔数 `WJZ-4.9 `、密钥 `0x42424242`）上实测时，三个后端**全都跑不起来**，一共查出
+五个互不相同的兼容性问题——而它们在 8.5.2 上**一个都看不见**，所以此前五个样本
+从没暴露过。
+
+### 修复
+
+- **`from renpy.compat import unicode` 被输出成 `import unicode`**。被导入的是**名字**
+  而不是模块，生成的读取器一执行就 `ModuleNotFoundError`。现在 `from X import Y`
+  照原样输出；来自游戏自己包的名字改用 shim（那个包在这里不可导入），Python 3
+  兼容别名（`unicode`、`basestring`、`pystr`、`PY2`、`bchr`、`bord`、`tobytes`）
+  进了兜底表。
+- **`archive_handlers.exts`/`.peek` 被无条件清空**。8.3.x 的注册表是个**普通 list**，
+  于是直接 `AttributeError`；现在只在缓存存在时才清。
+- **8.3.x 没有 `arc_files`**。读取器改为把存档名写进 `renpy.config.archives`——
+  那才是这个版本的 `index_archives()` 会去遍历的东西。
+- **`build()` 返回的是字典，字典的项是"返回那一刻的快照"**。8.3 的 `index_archives()`
+  写的是 `global archives; archives = []`（**重新绑定**）而不是 `archives.clear()`，
+  所以被填充的列表根本不是读取器持有的那个——每个游戏都报"0 条目"。现在索引完会从
+  该函数自己的 `__globals__` 重新取值。8.4+ 用的是 `clear()`，所以这个 bug 一直没露头。
+- **`--runtime` 探针**有同一假设的两处：一句诊断用的 `len(loader.arc_files)` 直接
+  中断整个运行；而 8.3.x 的索引路径需要先设好 `basedir`/`searchpath`，否则 `transfn`
+  解析不了，`index_archives()` 里那句 `except Exception: continue` 会**静默地什么都
+  不索引**。
+
+### 顺带修掉的两个
+
+- **`--write-core` 只在读取器建好之后才写文件**。于是当"生成的模块本身出错"时，
+  错误信息里那句"加 `--write-core` 看看生成的模块"**根本执行不了**——重跑会在同一个
+  地方失败，文件永远不会产生。现在它在编译/执行**之前**就写。
+- 准备读取器时的意外异常会打出**裸 traceback**，看起来像用户机器崩了。现在报成
+  内部错误，并提示附上游戏的 Ren'Py 版本。
+
+### 验证
+
+`skyblue` 解出 **1194 个文件**，`--inject` 与静态后端**逐字节完全一致**；另外四个
+样本游戏的生成模块**逐字节不变**、解包结果不变；156 个测试通过，且每个新测试都做了
+变异验证（把对应修复改回去，测试立刻失败）。
+
 ## 2.0.1
 
 ### 修复

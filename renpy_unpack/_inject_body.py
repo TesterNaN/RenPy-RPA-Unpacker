@@ -61,6 +61,17 @@ def _emit(record):
         _log("manifest write failed: %r" % (exc,))
 
 
+def _count(module, attribute):
+    """len() of an optional loader attribute, or a note that it is absent.
+
+    ``arc_files`` does not exist in older Ren'Py (8.3.x indexes through
+    ``renpy.config.archives`` instead), and a diagnostic line must never be the
+    thing that kills a run.
+    """
+    value = getattr(module, attribute, None)
+    return len(value) if value is not None else "n/a"
+
+
 def _run():
     import renpy.loader as loader
 
@@ -69,12 +80,13 @@ def _run():
     _log("  python   : %s" % sys.version.split()[0])
     _log("  gamedir  : %s" % renpy.config.gamedir)
     _log("  output   : %s" % _OUT)
-    _log("  arc_files: %d" % len(loader.arc_files))
+    _log("  arc_files: %s" % _count(loader, "arc_files"))
     _log("  archives : %d" % len(loader.archives))
 
     # The index is already built by now; this is belt-and-braces for a loader that
-    # indexes lazily at some other point.
-    if not loader.archives and loader.arc_files:
+    # indexes lazily at some other point.  Both attributes are optional: on 8.3.x
+    # there is no arc_files at all.
+    if not loader.archives and getattr(loader, "arc_files", None):
         _log("  index empty -> calling index_archives()")
         loader.index_archives()
         _log("  archives : %d" % len(loader.archives))

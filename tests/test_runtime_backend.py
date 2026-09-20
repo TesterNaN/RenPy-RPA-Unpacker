@@ -306,7 +306,11 @@ class TestProbeUsesTheLoadersExtensions(ScratchCase):
 
     def test_probe_reads_extensions_from_the_handler_registry(self):
         source = Path(probe.__file__).read_text(encoding="utf-8")
-        self.assertIn("archive_handlers.exts", source)
+        # Both shapes of the registry, because 8.3.x keeps a plain list of handler
+        # classes while 8.4+ keeps an object with an ``exts`` map; asking only the
+        # latter is what left a 8.3.4 game reporting zero archives.
+        self.assertIn('getattr(handlers, "exts", None)', source)
+        self.assertIn("handler.get_supported_extensions()", source)
         # No hardcoded glob may survive outside comments.
         code_lines = [
             line

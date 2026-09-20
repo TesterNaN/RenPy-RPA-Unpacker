@@ -566,6 +566,9 @@ class _Extractor:
         self.global_names = _global_declared_names(index.tree)
         #: Blocks emitted at the generated module's top level.
         self.module_blocks: list[str] = []
+        #: module -> names bound from it by ``from module import name`` in the
+        #: loader.  Distinct from ``_imports_needed``, which is modules only.
+        self._from_imports_needed: dict[str, set[str]] = {}
         self.emitted_assignments: set[int] = set()
         self.generated: list[str] = []
         self.shims: list[str] = []
@@ -627,8 +630,18 @@ class _Extractor:
             return
 
         if kind == "imported":
-            self._imports_needed.add(name)
-            self.provenance[name] = f"import ({self.index.imported_names[name]})"
+            # A name bound by `from X import Y` in the loader.  It is a *name*, not
+            # a module: emitting `import unicode` for `from renpy.compat import
+            # unicode` is what broke Ren'Py 8.3.x loaders outright.
+            origin = self.index.imported_names[name]
+            module = origin.rpartition(".")[0]
+            if module.split(".")[0] == "renpy":
+                # ...and the game's own package is not importable from here, so a
+                # name taken from it has to come from a shim.
+                self._use_fallback(name, required=required, chain=chain)
+                return
+            self._from_imports_needed.setdefault(module, set()).add(name)
+            self.provenance[name] = f"from {module} import {name}"
             self._done.add(name)
             return
 
@@ -738,6 +751,9 @@ class _Extractor:
 
         for name in sorted(self._imports_needed):
             lines.append(f"import {name}")
+
+        for module, names in sorted(self._from_imports_needed.items()):
+            lines.append(f"from {module} import {', '.join(sorted(names))}")
 
         if self.module_blocks:
             lines.append("")

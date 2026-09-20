@@ -630,3 +630,101 @@ def write_plain_pickle(path: Path, payload) -> Path:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_bytes(pickle.dumps(payload, protocol=2))
     return path
+
+
+#: A loader shaped like Ren'Py **8.3.x**, which differs from 8.4+ in four ways that
+#: each broke the reader until they were found on a real game (``skyblue``, 8.3.4,
+#: archives disguised as ``.blend``):
+#:
+#: 1. ``archive_handlers`` is a plain list, not an ``ArchiveHandlers`` object with
+#:    ``exts``/``peek`` caches -- clearing those attributes raised AttributeError.
+#: 2. There is no ``arc_files`` list at all; ``index_archives()`` walks
+#:    ``renpy.config.archives`` and resolves each prefix through ``transfn``.
+#: 3. ``index_archives()`` *rebinds* ``archives`` (``global archives; archives = []``)
+#:    instead of calling ``archives.clear()``, so the list ``build()`` handed back is
+#:    not the one that ends up populated.
+#: 4. Names come in through ``from renpy.compat import ... unicode ...``, which was
+#:    emitted as ``import unicode`` -- a module that does not exist.
+OLD_STYLE_LOADER = '''
+from renpy.compat import PY2, basestring, bchr, bord, chr, open, pystr, range, round, str, tobytes, unicode
+
+import io
+import os
+import pickle
+import zlib
+
+loads = pickle.loads
+
+archives = []
+old_config_archives = None
+archive_handlers = []
+
+
+def transfn(name):
+    for directory in renpy.config.searchpath:
+        fn = os.path.join(renpy.config.basedir, directory, name)
+        if os.path.exists(fn):
+            return fn
+    raise Exception("Couldn't find file %r." % name)
+
+
+class RPAv3ArchiveHandler(object):
+    archive_extension = ".rpa"
+
+    @staticmethod
+    def get_supported_extensions():
+        return [".rpa"]
+
+    @staticmethod
+    def get_supported_headers():
+        return [b"RPA-3.0 "]
+
+    @staticmethod
+    def read_index(infile):
+        l = infile.read(40)
+        offset = int(l[8:24], 16)
+        key = int(l[25:33], 16)
+        infile.seek(offset)
+        index = loads(zlib.decompress(infile.read()))
+
+        for k in index.keys():
+            index[k] = [(offset ^ key, dlen ^ key) for offset, dlen in index[k]]
+
+        return index
+
+
+archive_handlers.append(RPAv3ArchiveHandler)
+
+
+def index_archives():
+    global old_config_archives
+
+    if old_config_archives == renpy.config.archives:
+        return
+
+    old_config_archives = renpy.config.archives[:]
+
+    global archives
+    archives = []
+
+    for prefix in renpy.config.archives:
+        fn = transfn(unicode(prefix) + ".rpa")
+        with open(fn, "rb") as f:
+            file_header = f.read(8)
+            for handler in archive_handlers:
+                if not file_header.startswith(handler.get_supported_headers()[0]):
+                    continue
+                f.seek(0, 0)
+                archives.append((fn, handler.read_index(f)))
+                break
+
+
+def load_from_archive(name):
+    for afn, index in archives:
+        if name not in index:
+            continue
+        offset, dlen = index[name][0]
+        rv = RWopsIO(afn, "rb", base=offset, length=dlen)
+        return io.BufferedReader(rv)
+    return None
+'''

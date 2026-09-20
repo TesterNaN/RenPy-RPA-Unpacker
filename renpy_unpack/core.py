@@ -586,12 +586,19 @@ def build_reader(
     *,
     filename: str,
     unsafe_pickle: bool = False,
+    write_core: Path | None = None,
 ) -> tuple[dict, ExtractionResult]:
     """Extract, compile and execute the reader, returning its namespace.
 
     The generated module's ``build()`` takes no required arguments: every shim is
     defined *inside* the generated function, so the module is self-contained and
     there is no second place where a name could be supplied inconsistently.
+
+    *write_core* is written as soon as the source exists, before it is compiled or
+    executed.  Writing it only on success was useless for the case it exists for:
+    when the generated module itself is what fails, the error message tells the
+    user to inspect it with ``--write-core``, and that run would fail in exactly
+    the same place without ever producing the file.
     """
     fallbacks = _fallbacks.sources(unsafe_pickle=unsafe_pickle)
 
@@ -614,6 +621,10 @@ def build_reader(
             f"Looked for: {', '.join(REQUIRED_NAMES)}. "
             "This does not look like a Ren'Py loader.py."
         )
+
+    if write_core is not None:
+        write_core.parent.mkdir(parents=True, exist_ok=True)
+        write_core.write_text(result.source, encoding="utf-8")
 
     try:
         code = compile(result.source, "<renpy_unpack:generated>", "exec")
@@ -703,6 +714,29 @@ class Reader:
             )
         return tuple(values[field] for field in fields)
 
+    def _name_archives_in_config(self, archives: list[Path]) -> None:
+        """Name *archives* in ``renpy.config.archives``, the pre-8.4 way.
+
+        Older ``index_archives()`` does ``transfn(prefix + ext)`` for every entry
+        in that list, trying each handler-declared extension, so what it wants is
+        archive names *without* the extension.
+        """
+        config = getattr(self.namespace.get("renpy"), "config", None)
+        if config is None:
+            raise UnpackError(
+                "this loader has no arc_files list, and the reader has no config to "
+                "name archives in, so its archives cannot be indexed"
+            )
+
+        prefixes: list[str] = []
+        for archive in archives:
+            prefix = (
+                archive.name[: -len(archive.suffix)] if archive.suffix else archive.name
+            )
+            if prefix not in prefixes:
+                prefixes.append(prefix)
+        config.archives = prefixes
+
     def index_archives(self, archives: list[Path]) -> None:
         """Index *archives* in one call, using Ren'Py's own ``index_archives()``.
 
@@ -716,14 +750,10 @@ class Reader:
         which is how Ren'Py does it, and it keeps a single archive from being
         parsed once per candidate header.
         """
-        arc_files = self.namespace["arc_files"]
-        arc_files.clear()
+        arc_files = self.namespace.get("arc_files")
 
         usable = [archive for archive in archives if self.archivable_suffix(archive.suffix)]
         unusable = [archive for archive in archives if not self.archivable_suffix(archive.suffix)]
-
-        for archive in usable:
-            arc_files.append(self.arc_entry(archive, self.handlers_by_extension[archive.suffix][0][1]))
 
         if not usable:
             names = ", ".join(path.name for path in unusable)
@@ -731,6 +761,19 @@ class Reader:
                 f"these archives use an extension no extracted handler supports: {names}. "
                 f"Supported: {', '.join(sorted(self.handlers_by_extension)) or '(none)'}"
             )
+
+        if arc_files is None:
+            # Ren'Py 8.3.x and older have no ``arc_files`` list at all: their
+            # ``index_archives()`` walks ``renpy.config.archives`` and probes each
+            # prefix against the handler-declared extensions itself.  So the same
+            # information has to be handed over in that form instead.
+            self._name_archives_in_config(usable)
+        else:
+            arc_files.clear()
+            for archive in usable:
+                arc_files.append(
+                    self.arc_entry(archive, self.handlers_by_extension[archive.suffix][0][1])
+                )
 
         try:
             self.namespace["index_archives"]()
@@ -741,6 +784,32 @@ class Reader:
                 "use a newer RPA revision than the loader.py in use; try --loader "
                 "pointing at a matching Ren'Py SDK."
             ) from exc
+
+        self._reload_rebound_globals()
+
+    def _reload_rebound_globals(self) -> None:
+        """Re-read names the loader rebinds rather than mutates.
+
+        ``build()`` returns a dict, so every entry is a snapshot taken when it
+        returned.  Ren'Py 8.3's ``index_archives()`` starts with::
+
+            global archives
+            archives = [ ]
+
+        -- it *rebinds* the name, so the list handed back by ``build()`` is not the
+        one that ends up holding the index; the populated list is the generated
+        module's global and the reader would see zero entries.  8.4 and later use
+        ``archives.clear()``, which mutates in place, so this never showed up.
+        A function's ``__globals__`` is that live namespace.
+        """
+        module_globals = getattr(
+            self.namespace.get("index_archives"), "__globals__", None
+        )
+        if not module_globals:
+            return
+        for name in list(self.namespace):
+            if name in module_globals:
+                self.namespace[name] = module_globals[name]
 
     def load(self, name: str) -> io.BufferedReader | None:
         """Open one archive member, or ``None`` when no archive provides it.
@@ -883,8 +952,14 @@ def prepare_reader(namespace: dict, extraction: ExtractionResult) -> Reader:
             "this does not look like a Ren'Py loader.py"
         )
 
-    archive_handlers.exts.clear()
-    archive_handlers.peek.clear()
+    # Newer Ren'Py keeps the registry in an ``ArchiveHandlers`` object that caches
+    # header specs per extension; older versions use a plain list, which has no
+    # cache to clear.  (8.3.x is a plain list -- assuming otherwise crashed here
+    # with AttributeError rather than a readable message.)
+    for cache_name in ("exts", "peek"):
+        cache = getattr(archive_handlers, cache_name, None)
+        if cache is not None:
+            cache.clear()
 
     by_extension: dict[str, list[tuple[bytes, object]]] = {}
     handlers: list[object] = []
@@ -1389,16 +1464,15 @@ class Unpacker:
         loader = find_loader(self.game_root, self.loader_hint)
         source = parse_loader_source(read_loader_source(loader), str(loader))
         namespace, result = build_reader(
-            source, filename=str(loader), unsafe_pickle=self.unsafe_pickle
+            source,
+            filename=str(loader),
+            unsafe_pickle=self.unsafe_pickle,
+            write_core=self.write_core,
         )
         self.reader = prepare_reader(namespace, result)
         content_dir = self._game_content_dir()
         if content_dir is not None:
             self.reader.point_config_at(content_dir)
-
-        if self.write_core is not None:
-            self.write_core.parent.mkdir(parents=True, exist_ok=True)
-            self.write_core.write_text(result.source, encoding="utf-8")
 
         if self.archives:
             self.reader.index_archives(self.archives)
@@ -2172,6 +2246,20 @@ def main(argv: list[str] | None = None) -> int:
         result = unpacker.load_reader()
     except UnpackError as exc:
         print(f"\nerror: {exc}", file=sys.stderr)
+        return 3
+    except Exception as exc:
+        # Anything unexpected in here is our bug, not the user's, and a raw
+        # traceback reads like a crash of their machine rather than of this tool.
+        # Found by testing against Ren'Py 8.3.4, whose loader differs from 8.5's in
+        # several places the reader plumbing had assumed.
+        print(
+            f"\nerror: internal error while preparing the archive reader: "
+            f"{type(exc).__name__}: {exc}\n"
+            f"  This is a renpy_unpack bug, not a problem with your game. Please\n"
+            f"  re-run with --write-core to capture the generated module and report\n"
+            f"  it together with your game's Ren'Py version (game/script_version.txt).",
+            file=sys.stderr,
+        )
         return 3
 
     if args.inject:

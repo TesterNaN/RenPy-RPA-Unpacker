@@ -12,6 +12,8 @@ extractor splices into the generated module and prunes to only what is used.
 
 from __future__ import annotations
 
+import ast
+import functools
 import inspect
 import textwrap
 from typing import Callable
@@ -234,6 +236,63 @@ def _load_from_archive_impl():
     return None
 
 
+#: The Python-3 branch of ``renpy/compat/__init__.py``, which older loaders pull
+#: names out of with ``from renpy.compat import ... unicode ...``.
+#:
+#: These have to be shimmed rather than imported: the generated module is meant to
+#: stand alone, and the game's ``renpy`` package is not importable from here.  The
+#: definitions are the obvious Python-3 equivalents of the module's Python-2
+#: aliases; ``chr``, ``open``, ``range``, ``round`` and ``str`` also come from that
+#: import line but are builtins, so they are never requested.
+_COMPAT_SOURCE = '''\
+PY2 = False
+
+basestring = str
+
+pystr = str
+
+unicode = str
+
+
+def bchr(n):
+    return bytes([n])
+
+
+def bord(s):
+    if isinstance(s, (bytes, bytearray)):
+        return s[0]
+    return ord(s)
+
+
+def tobytes(s):
+    if isinstance(s, bytes):
+        return s
+    return s.encode("utf-8")
+'''
+
+
+def _compat_shims() -> dict[str, Callable[[], str]]:
+    """Per-name shims for the ``renpy.compat`` aliases a loader may reference."""
+    shims: dict[str, Callable[[], str]] = {}
+    for name in ("PY2", "basestring", "pystr", "unicode", "bchr", "bord", "tobytes"):
+        shims[name] = functools.partial(_compat_one, name)
+    return shims
+
+
+def _compat_one(name: str) -> str:
+    """The slice of :data:`_COMPAT_SOURCE` that defines *name*."""
+    module = ast.parse(_COMPAT_SOURCE)
+    for node in module.body:
+        if isinstance(node, ast.Assign):
+            if any(
+                isinstance(t, ast.Name) and t.id == name for t in node.targets
+            ):
+                return ast.unparse(node)
+        elif isinstance(node, ast.FunctionDef) and node.name == name:
+            return ast.unparse(node)
+    raise KeyError(name)  # pragma: no cover - the names above are all present
+
+
 #: name -> zero-argument callable returning source text.
 _REGISTRY: dict[str, Callable[[], str]] = {
     "loads": _loads,
@@ -242,6 +301,7 @@ _REGISTRY: dict[str, Callable[[], str]] = {
     "RWopsIO": _RWopsIO,
     "index_archives": _index_archives,
     "load_from_archive": _load_from_archive,
+    **_compat_shims(),
 }
 
 #: Names the extractor must always source from the shims, never from loader.py.
