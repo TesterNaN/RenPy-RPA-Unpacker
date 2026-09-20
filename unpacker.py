@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
 
-"""RenPy-RPA-Auto-Unpacker - unpack Ren'Py .rpa archives.
+"""RenPy-RPA-Unpacker - unpack Ren'Py .rpa archives.
 
 Copyright (C) 2025 TesterNaN
 

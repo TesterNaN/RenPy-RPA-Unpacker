@@ -1,10 +1,10 @@
-# RenPy-RPA-Auto-Unpacker 🚀
+# RenPy-RPA-Unpacker 🚀
 
 > 不猜加密、不试密钥、不自己解析格式 —— **直接借用游戏自己的解包代码**
 
 ## 📋 项目简介
 
-**RenPy-RPA-Auto-Unpacker** 是一个 Ren'Py 游戏 `.rpa` 存档解包工具。
+**RenPy-RPA-Unpacker** 是一个 Ren'Py 游戏 `.rpa` 存档解包工具。
 
 它的最大特色是：**不重新实现 RPA 格式，而是把游戏自己的 `renpy/loader.py` 借来用。**
 
