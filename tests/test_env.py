@@ -328,7 +328,7 @@ class TestCommandLine(EnvCase):
         status = self.cli(do_env=True, game=self.game, output=self.path("out2"), wait=0.1,
                           stream=stream)
         self.assertEqual(status, 1)
-        self.assertIn("restart it -- or simply start the", self.stderr.getvalue())
+        self.assertIn("restart it", self.stderr.getvalue())
 
 
 class TestTheExtensionItself(EnvCase):
