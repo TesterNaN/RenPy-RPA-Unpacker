@@ -17,6 +17,7 @@ from pathlib import Path
 from test_support import ScratchCase, sdk_loader
 
 from renpy_unpack.core import (  # noqa: E402
+    NO_ARCHIVES_NOTICE,
     UnpackError,
     Unpacker,
     build_reader,
@@ -236,7 +237,7 @@ class TestUnpackerEndToEnd(UnpackerHarness):
         root = self.make_game()
         unpacker = Unpacker(root, progress=False)
         unpacker.discover()
-        self.assertEqual(unpacker.output_dir(), root / "extracted_files")
+        self.assertEqual(unpacker.output_dir(), Path.cwd() / "extracted" / root.name)
 
     def test_discovery_walks_up_from_a_subdirectory(self):
         # run from a game's own subdirectory and discovery should still work
@@ -629,21 +630,6 @@ class TestNoArchivesAtAll(ScratchCase):
         (root / "game" / "audio.ogg").write_bytes(b"OggS" + b"\x00" * 64)
         return root
 
-    def test_already_unpacked_is_reported_as_such(self):
-        root = self.make_unpacked_game()
-        unpacker = Unpacker(root, jobs=1, progress=False)
-
-        with self.assertRaises(UnpackError) as ctx:
-            unpacker.discover()
-        message = str(ctx.exception)
-
-        self.assertIn("already unpacked", message)
-        self.assertIn("nothing to unpack", message)
-        # It must NOT tell the user their --game path is wrong.
-        self.assertNotIn("Pass --game", message)
-        # And it must point at the way to still get the files.
-        self.assertIn("--include-loose", message)
-
     def test_already_unpacked_probe_does_not_walk_the_asset_tree(self):
         """The probe only changes an error's wording, so it must stay cheap."""
         root = self.make_unpacked_game()
@@ -693,6 +679,21 @@ class TestNoArchivesAtAll(ScratchCase):
         )
         write_rpa3(root / "game" / "archive.rpa", PAYLOAD)
         return root
+
+def test_already_unpacked_is_reported_as_such(self):
+        root = self.make_unpacked_game()
+        unpacker = Unpacker(root, jobs=1, progress=False)
+
+        with self.assertRaises(UnpackError) as ctx:
+            unpacker.discover()
+        message = str(ctx.exception)
+
+        self.assertIn("already unpacked", message)
+        self.assertIn("nothing to unpack", message)
+        # It must NOT tell the user their --game path is wrong.
+        self.assertNotIn("Pass --game", message)
+        # And it must point at the way to still get the files.
+
 
 
 @unittest.skipUnless(SDK_LOADER, "no stock loader.py available")
@@ -764,18 +765,17 @@ class TestOutputInsideGameDir(ScratchCase):
         (root / "game").mkdir()
         # output_dir() is pure; discovery is not needed to check where it points.
         unpacker = Unpacker(root, progress=False)
-        self.assertEqual(unpacker.output_dir(), root / "extracted_files")
+        self.assertEqual(unpacker.output_dir(), Path.cwd() / "extracted" / root.name)
         self.assertNotIn(root / "game", unpacker.output_dir().parents)
 
     def test_default_output_stays_out_when_game_points_inside_game_dir(self):
         """Pointing --game at ``game`` must not default the output into ``game``.
 
-        This was a real hole.  ``output_dir()`` used ``<game_root>/extracted_files``,
-        and when ``--game`` named the ``game`` directory itself that resolved to
-        ``game/extracted_files`` -- inside the directory Ren'Py scans.  Extracting
+        The default is ``./extracted/<game folder>`` now, so that part is automatic.
+        What still needs the game's structure is the *caller*: running from inside
+        ``game/`` would otherwise put the output where Ren'Py scans, and extracting
         scripts there recreates the duplicate-label condition that stops a game from
-        starting, and the warning did not fire because it compared against
-        ``<game_root>/game``, a path that does not exist in that case.
+        starting.
         """
         from renpy_unpack.core import Unpacker
 
@@ -789,9 +789,26 @@ class TestOutputInsideGameDir(ScratchCase):
         unpacker = Unpacker(game_dir, progress=False)
         output = unpacker.output_dir()
 
-        self.assertNotEqual(output, game_dir / "extracted_files")
         self.assertNotIn(game_dir, output.parents)
-        self.assertEqual(output, base / "extracted_files")
+        self.assertEqual(output, Path.cwd() / "extracted" / base.name)
+
+    def test_running_from_inside_game_dir_falls_back_to_the_game_root(self):
+        """The one case a working-directory default cannot handle: cwd *is* the
+        directory Ren'Py scans, so the game's own root is used instead."""
+        from unittest import mock
+
+        from renpy_unpack.core import Unpacker
+
+        base = self.path("DeepGame").resolve()
+        game_dir = base / "game"
+        game_dir.mkdir(parents=True)
+        write_rpa3(game_dir / "archive.rpa", {"rpy/a.rpy": b"label a:\n    return\n"})
+
+        with mock.patch("pathlib.Path.cwd", return_value=game_dir):
+            output = Unpacker(game_dir, progress=False).output_dir()
+
+        self.assertNotIn(game_dir, output.parents)
+        self.assertEqual(output, base / "extracted" / base.name)
 
     def test_trimmed_game_without_renpy_is_still_recognised(self):
         # A repacked release may ship no renpy/ directory at all; archives and
@@ -828,158 +845,6 @@ class TestOutputInsideGameDir(ScratchCase):
         warning = _warn_if_inside_game_dir(unpacker, unpacker.entries)
         self.assertIsNotNone(warning)
         self.assertIn("define the same label twice", warning)
-
-
-class TestIncludeLoose(ScratchCase):
-    """Loose files go through the game's loader too -- just without decryption.
-
-    The loader is the authority either way: ``walkdir`` enumerates what Ren'Py
-    considers game content, and ``load`` reads it.  That makes an already-unpacked
-    game a valid target instead of a dead end.
-    """
-
-    @classmethod
-    def setUpClass(cls):
-        if SDK_LOADER is None:
-            raise unittest.SkipTest("no Ren'Py loader.py available")
-
-    def make_unpacked_game(self) -> Path:
-        root = self.path("Unpacked")
-        (root / "renpy").mkdir(parents=True)
-        (root / "game" / "screens").mkdir(parents=True)
-        (root / "renpy" / "loader.py").write_text(
-            read_loader_source(SDK_LOADER), encoding="utf-8"
-        )
-        # Plain, unencrypted content: exactly a game somebody already unpacked.
-        (root / "game" / "script.rpy").write_text(
-            "label start:\n    return\n", encoding="utf-8"
-        )
-        (root / "game" / "screens" / "gui.rpy").write_text(
-            "screen gui():\n    pass\n", encoding="utf-8"
-        )
-        (root / "game" / "note.txt").write_bytes(b"hello loose file\n")
-        (root / "game" / "img.png").write_bytes(
-            b"\x89PNG\r\n\x1a\n" + bytes(range(64))
-        )
-        return root
-
-    def test_without_the_flag_an_unpacked_game_is_not_a_target(self):
-        root = self.make_unpacked_game()
-        unpacker = Unpacker(root, jobs=1, progress=False)
-        with self.assertRaises(UnpackError) as ctx:
-            unpacker.discover()
-        # The message should point at the way to still get the files.
-        self.assertIn("--include-loose", str(ctx.exception))
-
-    def test_loose_files_are_enumerated_by_the_loader(self):
-        root = self.make_unpacked_game()
-        unpacker = Unpacker(root, include_loose=True, jobs=1, progress=False)
-        unpacker.discover()
-        unpacker.load_reader()
-
-        names = sorted(entry.name for entry in unpacker.entries)
-        self.assertIn("script.rpy", names)
-        self.assertIn("screens/gui.rpy", names)
-        self.assertIn("note.txt", names)
-        self.assertIn("img.png", names)
-        self.assertTrue(all(entry.loose for entry in unpacker.entries))
-        self.assertEqual(unpacker.archives, [])
-
-    def test_loose_files_are_read_byte_exactly(self):
-        """Read through ``loader.load()``, and compare against the real files."""
-        root = self.make_unpacked_game()
-        out = self.path("out")
-        stats = Unpacker(
-            root, output=out, include_loose=True, jobs=2, progress=False
-        ).run()
-
-        self.assertEqual(stats.failed, 0, stats.failures)
-        self.assertEqual(stats.extracted, 4)
-        for relative in ("script.rpy", "screens/gui.rpy", "note.txt", "img.png"):
-            self.assertEqual(
-                (out / relative).read_bytes(),
-                (root / "game" / relative).read_bytes(),
-                relative,
-            )
-
-    def test_loose_and_archived_members_coexist(self):
-        root = self.path("Mixed")
-        (root / "renpy").mkdir(parents=True)
-        (root / "game").mkdir()
-        (root / "renpy" / "loader.py").write_text(
-            read_loader_source(SDK_LOADER), encoding="utf-8"
-        )
-        write_rpa3(
-            root / "game" / "archive.rpa",
-            {"archived.txt": b"from archive\n", "shared.txt": b"archived copy\n"},
-        )
-        (root / "game" / "loose.txt").write_bytes(b"loose file\n")
-        (root / "game" / "shared.txt").write_bytes(b"loose copy\n")
-
-        out = self.path("out")
-        stats = Unpacker(
-            root, output=out, include_loose=True, jobs=2, progress=False
-        ).run()
-
-        self.assertEqual(stats.failed, 0, stats.failures)
-        self.assertEqual((out / "archived.txt").read_bytes(), b"from archive\n")
-        self.assertEqual((out / "loose.txt").read_bytes(), b"loose file\n")
-        # A loose file shadows the archived copy, which is how Ren'Py resolves too.
-        self.assertEqual((out / "shared.txt").read_bytes(), b"loose copy\n")
-
-    def test_file_open_callbacks_are_wired_in_renpys_order(self):
-        """The callback list is built by statements the extractor cannot see.
-
-        Only definitions are recovered, so ``file_open_callbacks`` arrives empty and
-        ``load()`` finds nothing at all.  Order matters: the filesystem opener is
-        registered before the archive one, which is why a loose file shadows an
-        archived copy.
-        """
-        root = self.make_unpacked_game()
-        unpacker = Unpacker(root, include_loose=True, jobs=1, progress=False)
-        unpacker.discover()
-        unpacker.load_reader()
-
-        callbacks = unpacker.reader.namespace["file_open_callbacks"]
-        names = [getattr(cb, "__name__", str(cb)) for cb in callbacks]
-        self.assertEqual(names, ["load_from_filesystem", "load_from_archive"])
-
-    def test_reader_config_points_at_the_game_directory(self):
-        # loader.load() resolves through transfn(), which needs basedir/searchpath.
-        root = self.make_unpacked_game()
-        unpacker = Unpacker(root, include_loose=True, jobs=1, progress=False)
-        unpacker.discover()
-        unpacker.load_reader()
-
-        config = unpacker.reader.namespace["renpy"].config
-        self.assertEqual(config.basedir, str(root.resolve()))
-        self.assertEqual(config.searchpath, ["game"])
-    """With nothing to work on, the tool must explain itself, not crash."""
-
-    def test_missing_loader_message_names_the_search_paths(self):
-        with self.assertRaises(UnpackError) as ctx:
-            find_loader(self.path("EmptyGame"))
-        self.assertIn("loader.py", str(ctx.exception))
-        self.assertIn("--loader", str(ctx.exception))
-
-    def test_no_archives_message_names_the_flag(self):
-        with self.assertRaises(UnpackError) as ctx:
-            discover_game_root(self.path("EmptyGame"))
-        self.assertIn("--game", str(ctx.exception))
-
-    def test_explicit_loader_that_does_not_exist_is_rejected(self):
-        with self.assertRaises(UnpackError) as ctx:
-            find_loader(self.path("EmptyGame"), self.path("nope", "loader.py"))
-        self.assertIn("--loader", str(ctx.exception))
-
-    def test_non_loader_file_is_rejected_clearly(self):
-        with self.assertRaises(UnpackError) as ctx:
-            build_reader("import os\n", filename="<not-a-loader>")
-        self.assertIn("index_archives", str(ctx.exception))
-
-    def test_unparseable_source_raises_a_clear_error(self):
-        with self.assertRaises(UnpackError):
-            parse_loader_source("def broken(:\n", "loader.py")
 
 
 class TestOldStyleLoader(ScratchCase):

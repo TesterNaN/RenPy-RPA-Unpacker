@@ -455,9 +455,13 @@ error: found no .rpa/.rpi archive looking in ...
 
 | 情况 | 提示 |
 | --- | --- |
-| 资源是散文件（本样本） | `appears to be already unpacked: its scripts and assets are plain files on disk ... There is nothing for this tool to extract.` |
+| 资源是散文件（本样本） | 首句 `no packed archive found -- this game may ship loose files only.`，接着 `appears to be already unpacked: its scripts and assets are plain files on disk ... There is nothing to unpack.`，最后给出 `--include-loose` 的出路 |
 | `--loader` 与自带 loader 冲突 | 报冲突，说明 `--loader` 未被使用以及两者对格式的判断差异 |
 | 真的找不到存档 | 报出 loader 声明了哪些扩展名、哪些候选文件被头部嗅探拒绝 |
+
+> 第一句刻意保持中性：**"散文件发行"和"已经解包过"在磁盘上长得一样**（判定本来就只能靠
+> 浅扫描），而后者只是其中一种可能。默认按"你之前解过包"来说，对前一种情况是冤枉的——
+> 实测 `Mainichikisushite` 就是 3295 个散文件、零归档的**原生散文件发行**。
 
 判定"已解包"用的是**浅扫描**（只看 `game/` 及其一级子目录，找到 3 个 `.rpy` 或多于 0 个就够）——
 它只影响一句错误措辞，不值得为此遍历几 GB 的资源树。实测该路径耗时 **0.09 秒**。

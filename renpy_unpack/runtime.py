@@ -351,16 +351,25 @@ def _probe_source() -> str:
 def child_environment() -> dict[str, str]:
     """Environment for the game's interpreter -- inert, and write-free.
 
-    ``RENPY_DISABLE_LOG`` stops Ren'Py from dropping a log next to the game.
-    ``PYTHONDONTWRITEBYTECODE`` matters just as much and was missed for a long time:
-    importing the game's ``renpy`` package compiles it, and CPython caches the
-    result in ``renpy/__pycache__/`` *inside the installation*.  One run against a
-    real Steam install left 52 ``.pyc`` files there, in a backend whose whole point
-    is that the game directory is read-only for us.
+    ``PYTHONDONTWRITEBYTECODE`` is what keeps this write-free, and it was missed for
+    a long time: importing the game's ``renpy`` package compiles it, and CPython
+    caches the result in ``renpy/__pycache__/`` *inside the installation*.  One run
+    against a real Steam install left 52 ``.pyc`` files there, in a backend whose
+    whole point is that the game directory is read-only for us.
+
+    This also used to set ``RENPY_DISABLE_LOG``, "so Ren'Py does not drop a log next
+    to the game".  No such variable exists -- it appears nowhere in ``renpy/*.py``
+    nor in ``librenpython.dll`` -- so it never did anything.  It was not needed
+    either: the probe stops at the loader import, before ``renpy.log`` is set up, so
+    no log is written.  Verified against a real 8.3.4 install, where ``log.txt`` and
+    ``renpy/__pycache__/`` both kept their original timestamps across a run.  The
+    real knob, should the probe ever be made to run deeper, is ``RENPY_LOG_BASE``.
     """
     env = dict(os.environ)
-    env.setdefault("RENPY_DISABLE_LOG", "1")
-    env.setdefault("PYTHONDONTWRITEBYTECODE", "1")
+    # Assigned rather than setdefault-ed: inheriting ``PYTHONDONTWRITEBYTECODE=0``
+    # from a caller would silently turn the bytecode caching back on, which is the
+    # one thing this backend must not do.
+    env["PYTHONDONTWRITEBYTECODE"] = "1"
     return env
 
 

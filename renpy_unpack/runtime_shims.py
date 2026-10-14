@@ -167,9 +167,8 @@ def make_loads(unsafe: bool = False):
 class RenpyConfig:
     """Stands in for ``renpy.config``, limited to what the reading path touches.
 
-    ``index_archives`` only needs ``archives``.  Reading a *loose* file goes through
-    ``loader.load()``, which resolves the name via ``transfn`` -- and that needs
-    ``basedir`` and ``searchpath`` to find anything on disk.
+    The loader's own code reads ``basedir``/``searchpath`` while resolving names,
+    so they are kept even though this tool asks for archive members only.
     """
 
     def __init__(self, basedir: str = "", searchpath: list[str] | None = None):
@@ -179,8 +178,7 @@ class RenpyConfig:
         self.search_prefixes = [""]
         self.tl_directory = "tl"
         self.reject_backslash = False
-        # load_from_archive reads this; False means loose files win, which is
-        # Ren'Py's normal behaviour and what we want to mirror.
+        # load_from_archive reads this; False is Ren'Py's own setting.
         self.force_archives = False
 
 

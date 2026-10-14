@@ -75,18 +75,17 @@ def _renpy() -> str:
             "    def __init__(self):",
             "        self.archives = []",
             # Only what the *reading* path touches.  `index_archives` needs
-            # `archives`; `load()`/`transfn` need `basedir`, `searchpath`,
-            # `reject_backslash`, `search_prefixes` and `tl_directory`.  A full
-            # renpy.config cannot be synthesised, so the shim stays limited to
-            # these -- and anything added here must keep `searchpath` pointing at
-            # the real game directory, since that is what locates loose files.
+            # `archives`; the loader's own name resolution needs `basedir`,
+            # `searchpath`, `reject_backslash`, `search_prefixes` and
+            # `tl_directory`.  A full renpy.config cannot be synthesised, so the shim
+            # stays limited to these -- and anything added here must keep
+            # `searchpath` pointing at the real game directory.
             "        self.basedir = ''",
             "        self.searchpath = ['game']",
             "        self.search_prefixes = ['']",
             "        self.tl_directory = 'tl'",
             "        self.reject_backslash = False",
-            "        # load_from_archive reads this; False means loose files win, which",
-            "        # is Ren'Py's normal behaviour and what we want to mirror.",
+            "        # load_from_archive reads this; False is Ren'Py's own setting.",
             "        self.force_archives = False",
             "",
             "    def __repr__(self):  # keeps the generated module debuggable",

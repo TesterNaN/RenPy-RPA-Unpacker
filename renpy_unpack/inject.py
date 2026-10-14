@@ -48,6 +48,10 @@ class InjectResult:
     failed: int = 0
     missing: int = 0
     bytes_written: int = 0
+    #: How many archives the game's loader had indexed, as reported by the injected
+    #: script.  ``None`` when the script never got far enough to say, which is a
+    #: different statement from "it looked and found none".
+    archives: int | None = None
     failures: list[tuple[str, str]] = field(default_factory=list)
     fatal: str = ""
     log: str = ""
@@ -83,6 +87,8 @@ class InjectResult:
             elif status == "done":
                 # The script's own total; prefer it over the summed sizes.
                 self.bytes_written = int(record.get("size") or self.bytes_written)
+                if "archives" in record:
+                    self.archives = int(record["archives"])
             elif status == "fatal":
                 self.fatal = record.get("error", "unknown fatal error")
 
@@ -126,8 +132,16 @@ class Injector:
         timeout: float = 3600.0,
     ):
         self.layout = layout
-        self.output = Path(output)
-        self.scratch = Path(scratch) if scratch else None
+
+        # Absolute from here on, and that is not cosmetic.  The generated script runs
+        # inside the game process, whose working directory is the game root, so a
+        # relative ``--output`` is created *inside the installation*: measured, ``-o
+        # .test-scratch/out`` put all 2003 extracted files (459 MiB) under
+        # ``<game>/.test-scratch/out``.  The manifest and log travel the same way, so
+        # the parent then looked for them beside *itself* and found nothing.  The other
+        # two backends never see this because they run in this process.
+        self.output = Path(os.path.abspath(output))
+        self.scratch = Path(os.path.abspath(scratch)) if scratch else None
         self.only = list(only or [])
         self.skip_existing = skip_existing
         self.keep_script = keep_script
@@ -162,32 +176,67 @@ class Injector:
 
     # -- run ---------------------------------------------------------------
 
-    def run(self) -> InjectResult:
-        result = InjectResult()
+    def manifest_path(self) -> Path:
+        """Where the game records what it extracted -- inside the scratch directory."""
+        return self._scratch_dir() / "manifest.jsonl"
+
+    def prepare(self) -> Path:
+        """Write the script and clear the previous run's manifest; launch nothing.
+
+        This is the manual path: the game is started by the user (from Steam, say),
+        the result is read later with :meth:`collect`, and the script is removed with
+        :meth:`cleanup`.
+        """
         script = self.script_path()
         scratch = self._scratch_dir()
-        manifest = scratch / "manifest.jsonl"
+        manifest = self.manifest_path()
         log = scratch / "inject.log"
 
         self._check_writable(self.game_dir())
-
         self.output.mkdir(parents=True, exist_ok=True)
         manifest.unlink(missing_ok=True)
         log.unlink(missing_ok=True)
 
-        config = {
-            "output": str(self.output),
-            "manifest": str(manifest),
-            "only": self.only,
-            "skip_existing": self.skip_existing,
-        }
+        # Written before anything else can look at the game directory.
+        script.write_text(
+            build_script(
+                {
+                    "output": str(self.output),
+                    "manifest": str(manifest),
+                    "only": self.only,
+                    "skip_existing": self.skip_existing,
+                    # So the script can take itself away: in the manual path nobody
+                    # is waiting for the game, and only the script knows its path.
+                    "script": str(script),
+                    "bytecode": str(script.with_suffix(".rpyc")),
+                }
+            ),
+            encoding="utf-8",
+        )
+        return script
 
+    def collect(self) -> InjectResult:
+        """What the game wrote, without a launch of our own."""
+        result = InjectResult()
+        result.script = self.script_path()
+        result.absorb(self.manifest_path())
+        log = self._scratch_dir() / "inject.log"
+        if log.is_file():
+            result.log = log.read_text(encoding="utf-8", errors="replace")
+        return result
+
+    def cleanup(self) -> list:
+        """Take the script (and the scratch state) away again."""
+        return self._cleanup(self.script_path(), self._scratch_dir())
+
+    def run(self) -> InjectResult:
+        result = InjectResult()
+        script = self.prepare()
         result.script = script
         try:
-            # Written before the game starts, so nothing else can race us here.
-            script.write_text(build_script(config), encoding="utf-8")
-            self._launch()
-            result.absorb(manifest)
+            self._launch(self._scratch_dir())
+            result.absorb(self.manifest_path())
+            log = self._scratch_dir() / "inject.log"
             if log.is_file():
                 result.log = log.read_text(encoding="utf-8", errors="replace")
 
@@ -195,7 +244,7 @@ class Injector:
                 raise InjectError(
                     "the injected script failed inside the game:\n" + result.fatal
                 )
-            if not manifest.is_file():
+            if not self.manifest_path().is_file():
                 raise InjectError(
                     "the game started but never ran the injected script, so no "
                     "manifest was written. It may have failed before loading "
@@ -205,15 +254,34 @@ class Injector:
                 )
             return result
         finally:
-            result.leftovers = self._cleanup(script, scratch)
+            result.leftovers = self.cleanup()
 
-    def _launch(self) -> None:
+    def _launch(self, scratch: Path) -> None:
         command = [
             str(self.layout.python),
             str(self.launcher()),
         ]
         env = dict(os.environ)
-        env.setdefault("RENPY_DISABLE_LOG", "1")
+
+        # Ren'Py writes ``log.txt`` / ``errors.txt`` / ``traceback.txt`` beside its log
+        # base -- ``renpy/log.py`` joins ``RENPY_LOG_BASE or config.logdir`` with each
+        # name -- and nothing turns logging off.  The name this used to set,
+        # ``RENPY_DISABLE_LOG``, appears nowhere in ``renpy/*.py`` nor in
+        # ``librenpython.dll``, so it did nothing, and every ``--inject`` run ended up
+        # overwriting the game's own ``log.txt``.  Aiming the base at the scratch
+        # directory leaves the installation byte-identical: that directory is removed
+        # along with the rest of the scratch state.
+        env["RENPY_LOG_BASE"] = str(scratch)
+
+        # Booting the game imports most of its own ``renpy`` package, and CPython
+        # caches that bytecode in ``renpy/__pycache__/`` *inside the installation*.
+        # Measured: one ``--inject`` run against a real 8.6.0 install rewrote 154
+        # ``.pyc`` files there.  ``--runtime`` had exactly this bug and was fixed with
+        # this same variable; the reason it is worse here is that the injected run
+        # gets all the way to init code and interface creation, while the runtime
+        # probe stops at the loader import.  Assigned rather than setdefault-ed: a
+        # caller with ``PYTHONDONTWRITEBYTECODE=0`` must not turn this back on.
+        env["PYTHONDONTWRITEBYTECODE"] = "1"
         try:
             subprocess.run(
                 command,
@@ -244,9 +312,11 @@ class Injector:
         except OSError as exc:
             raise InjectError(
                 f"cannot write into {directory} ({exc}).\n"
-                "  --inject works by adding a script to the game directory, which "
-                "means it needs write access there -- unusual for an installed game "
-                "(Program Files is read-only by default).\n"
+                "  --inject works by adding a script to the game directory, so it "
+                "needs write access there.  That is normally not a problem -- the real "
+                "caveat is that this backend does touch game/: use it where nothing "
+                "verifies file integrity, since a launcher that checks or restores the "
+                "game files will flag or undo it.\n"
                 "  Use --runtime instead: it reads the archives through the game's "
                 "own runtime without writing anything into the game."
             ) from exc

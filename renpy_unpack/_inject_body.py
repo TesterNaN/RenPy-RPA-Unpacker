@@ -117,6 +117,7 @@ def _run():
     _log("  entries  : %d" % len(names))
 
     total = 0
+    failed = 0
     for position, name in enumerate(names, 1):
         target = os.path.join(_OUT, name.replace("/", os.sep))
         try:
@@ -126,6 +127,7 @@ def _run():
 
             handle = loader.load_from_archive(name)
             if handle is None:
+                failed += 1
                 _emit({"name": name, "status": "missing", "size": 0})
                 continue
             try:
@@ -145,6 +147,7 @@ def _run():
             if position % 200 == 0:
                 _log("  progress : %d/%d" % (position, len(names)))
         except Exception as exc:
+            failed += 1
             _emit(
                 {
                     "name": name,
@@ -155,7 +158,37 @@ def _run():
             )
 
     _log("  done     : %.1f MiB" % (total / 1048576.0))
-    _emit({"name": "", "status": "done", "size": total})
+    if not loader.archives:
+        _log("  note     : no packed archive found in this game")
+
+    # The archive count rides along in the manifest because the parent is the one
+    # that talks to the user, and "extracted 0 file(s)" is all it would otherwise
+    # have to go on.  A game with no archives is an answer, not a failure.
+    _emit(
+        {
+            "name": "",
+            "status": "done",
+            "size": total,
+            "archives": len(loader.archives),
+            "failures": failed,
+        }
+    )
+
+    # Take ourselves away again.  The parent can only do that in the automatic path;
+    # when the game was started by hand nobody is waiting to clean up, and a script left
+    # behind extracts all over again on every later launch.  Only after a clean run -- a
+    # partial extraction stays put so it can simply be repeated.
+    if not failed:
+        for path in (_CONFIG.get("script"), _CONFIG.get("bytecode")):
+            if not path:
+                continue
+            try:
+                os.unlink(path)
+                _log("  removed %s" % os.path.basename(path))
+            except FileNotFoundError:
+                pass
+            except OSError as exc:
+                _log("  could not remove %s (%s)" % (path, exc))
 
 
 try:

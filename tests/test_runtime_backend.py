@@ -447,7 +447,22 @@ class TestNoScratchFiles(ScratchCase):
 
         env = child_environment()
         self.assertEqual(env["PYTHONDONTWRITEBYTECODE"], "1")
-        self.assertEqual(env["RENPY_DISABLE_LOG"], "1")
+
+        # ...and an inherited ``0`` must not be able to turn the caching back on, which
+        # is the one thing this backend must never allow.
+        from unittest import mock
+
+        with mock.patch.dict(os.environ, {"PYTHONDONTWRITEBYTECODE": "0"}):
+            forced = child_environment()
+        self.assertEqual(forced["PYTHONDONTWRITEBYTECODE"], "1")
+
+        # ...and it adds nothing else.  This backend used to also set
+        # ``RENPY_DISABLE_LOG``, a name that appears nowhere in ``renpy/*.py`` nor in
+        # ``librenpython.dll`` -- it did nothing, while reading like the reason the run
+        # is write-free.  Bounding the whole delta is what keeps another invented
+        # variable from being added back.
+        new_keys = set(env) - set(os.environ)
+        self.assertLessEqual(new_keys, {"PYTHONDONTWRITEBYTECODE"})
 
     def test_probe_turns_bytecode_writing_off_itself(self):
         # Belt and braces: the probe disables it as its first statement, so the

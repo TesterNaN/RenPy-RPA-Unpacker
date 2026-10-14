@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import json
 import unittest
+from unittest import mock
 from pathlib import Path
 
 from test_support import ScratchCase
@@ -151,6 +152,35 @@ class TestManifestReading(ScratchCase):
         self.assertEqual(result.bytes_written, 15)
         self.assertEqual(len(result.failures), 2)
 
+    def test_the_archive_count_distinguishes_none_from_zero(self):
+        """The script reports how many archives it indexed, which explains a 0-file run.
+
+        ``None`` (the script never got that far) and ``0`` (it looked and found no
+        archives) must not collapse into one value: only the second means the release
+        ships its files loose, and only the second is worth telling the user about.
+        """
+        self.assertIsNone(InjectResult().archives)
+
+        unpacked = InjectResult()
+        unpacked.absorb(
+            self.write([{"name": "", "status": "done", "size": 0, "archives": 0}])
+        )
+        self.assertEqual(unpacked.archives, 0)
+
+        packed = InjectResult()
+        packed.absorb(
+            self.write([{"name": "", "status": "done", "size": 0, "archives": 3}])
+        )
+        self.assertEqual(packed.archives, 3)
+
+    def test_a_manifest_without_the_count_stays_unknown(self):
+        """A manifest written before the count existed must not read as "none"."""
+        result = InjectResult()
+        result.absorb(self.write([{"name": "", "status": "done", "size": 7}]))
+
+        self.assertIsNone(result.archives)
+        self.assertEqual(result.bytes_written, 7)
+
     def test_partial_manifest_still_reports_what_completed(self):
         """A crash mid-run leaves earlier records; count them rather than nothing."""
         result = InjectResult()
@@ -281,6 +311,124 @@ class TestInjectorPlumbing(ScratchCase):
         with self.assertRaises(UnpackError) as ctx:
             Unpacker(root, inject=True, runtime=True, progress=False)
         self.assertIn("pick one", str(ctx.exception))
+
+    def test_prepare_writes_the_script_without_launching_anything(self):
+        """The manual path: the script goes in, the game is somebody else's job."""
+        root = self.path("Game")
+        layout = make_layout(root)
+        out = self.path("out")
+        out.mkdir()
+        injector = Injector(layout, out)
+
+        with mock.patch("renpy_unpack.inject.subprocess.run") as run:
+            script = injector.prepare()
+
+        run.assert_not_called()
+        self.assertTrue(script.is_file())
+        # The config is embedded as a repr()'d JSON literal, so read it back instead of
+        # matching on the escaping.
+        import ast
+        import re
+
+        literal = re.search(r"_CONFIG = json\.loads\((.*)\)",
+                            script.read_text(encoding="utf-8")).group(1)
+        self.assertEqual(json.loads(ast.literal_eval(literal))["output"], str(out))
+
+    def test_collect_reads_what_the_game_wrote_without_launching(self):
+        root = self.path("Game")
+        layout = make_layout(root)
+        out = self.path("out")
+        out.mkdir()
+        injector = Injector(layout, out)
+        injector.prepare()
+        injector.manifest_path().write_text(
+            json.dumps({"name": "a.txt", "status": "ok", "size": 3}) + "\n",
+            encoding="utf-8",
+        )
+
+        with mock.patch("renpy_unpack.inject.subprocess.run") as run:
+            result = injector.collect()
+
+        run.assert_not_called()
+        self.assertEqual(result.ok, 1)
+        self.assertEqual(result.bytes_written, 3)
+
+    def test_cleanup_takes_the_script_away_again(self):
+        root = self.path("Game")
+        layout = make_layout(root)
+        out = self.path("out")
+        out.mkdir()
+        injector = Injector(layout, out)
+        script = injector.prepare()
+
+        leftovers = injector.cleanup()
+
+        self.assertEqual(leftovers, [])
+        self.assertFalse(script.exists())
+
+    def test_the_cleanup_command_reports_and_removes(self):
+        """``--inject-cleanup`` is how a manual run is finished off."""
+        from renpy_unpack import core
+
+        root = self.path("Game")
+        layout = make_layout(root)
+        out = self.path("out")
+        out.mkdir()
+        script = Injector(layout, out).prepare()
+
+        import contextlib
+        import io
+
+        with mock.patch("renpy_unpack.runtime.discover_runtime", return_value=layout), \
+                contextlib.redirect_stdout(io.StringIO()):
+            status = core.main(["--inject-cleanup", "--game", str(root), "-o", str(out)])
+
+        self.assertEqual(status, 0)
+        self.assertFalse(script.exists())
+
+    def test_launch_leaves_no_bytecode_cache_in_the_installation(self):
+        """Booting the game must not drop ``.pyc`` caches into the game's own tree.
+
+        Measured before this was set: one ``--inject`` run against a real 8.6.0 install
+        rewrote 154 shipped ``.pyc`` files under ``renpy/__pycache__/``.  It is worse
+        here than for ``--runtime`` because the injected run gets all the way to init
+        code and interface creation, while the runtime probe stops at the loader
+        import.
+        """
+        from unittest import mock
+
+        root = self.path("Game")
+        layout = make_layout(root)
+        out = self.path("out")
+        out.mkdir()
+        injector = Injector(layout, out)
+
+        with mock.patch("renpy_unpack.inject.subprocess.run") as run:
+            injector._launch(injector._scratch_dir())
+
+        env = run.call_args.kwargs["env"]
+        self.assertEqual(env["PYTHONDONTWRITEBYTECODE"], "1")
+        # The log is aimed outside the installation for the same reason.
+        self.assertIn("RENPY_LOG_BASE", env)
+
+    def test_a_relative_output_is_resolved_against_the_caller(self):
+        """The script runs inside the game, so a relative path lands in the install.
+
+        Measured: ``-o .test-scratch/out`` put all 2003 extracted files (459 MiB) under
+        ``<game>/.test-scratch/out``, because the game process's working directory is
+        the game root.  The manifest and log are derived from the same path, so the
+        parent then looked for them beside itself.  Resolving here fixes all of it,
+        since the caller's directory is this process's directory.
+        """
+        root = self.path("Game")
+        layout = make_layout(root)
+        injector = Injector(layout, Path("relative-out"))
+
+        self.assertTrue(injector.output.is_absolute())
+        # Resolved against this process's directory, which is the caller's -- that is
+        # exactly what the game process cannot do for itself.
+        self.assertEqual(injector.output.parent, Path.cwd())
+        self.assertEqual(injector.output.name, "relative-out")
 
     def test_conflicting_flags_do_not_escape_as_a_traceback(self):
         """The constructor rejects the conflict; ``main`` must report it, not crash.

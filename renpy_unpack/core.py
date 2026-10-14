@@ -46,12 +46,9 @@ __all__ = ["ArchiveEntry", "Unpacker", "UnpackError", "discover_game_root", "fin
 #: absent -- they are discovered from the loader's own registration calls, because
 #: a modified loader may offer formats beyond the stock RPA v1/v2/v3.
 #:
-#: ``load`` and ``walkdir`` are here for ``--include-loose``: loose files are
-#: enumerated and read through the game's own loader as well, just without the
-#: archive/decryption step.  ``transfn`` and ``load_from_filesystem`` come along
-#: because ``load()`` dispatches through Ren'Py's callback list, and the filesystem
-#: callback is the one that actually locates a loose file -- without them it raises
-#: ``FileNotFoundError`` even for a file sitting right there.
+#: ``load``, ``walkdir``, ``transfn`` and ``load_from_filesystem`` are part of the
+#: loader's own name resolution.  This tool reads archive members only, but the
+#: game's code runs as written, so the surface it expects stays available.
 REQUIRED_NAMES = (
     "ArchiveHandlers",
     "index_archives",
@@ -72,6 +69,17 @@ FALLBACK_HANDLER_NAMES = (
 )
 
 ARCHIVE_SUFFIXES = (".rpa", ".rpi")
+
+#: Shown when a game turns out to have no packed archives at all.
+#:
+#: Not an error by itself: loose-file releases are real -- one game ships 3295
+#: loose files and not one archive -- and a bare "0 file(s)" reads like this tool
+#: failed rather than like an answer.  Saying it up front also stops "no archive
+#: here" from being read as "your --game path is wrong".
+NO_ARCHIVES_NOTICE = (
+    "no packed archive found -- this release may keep its files loose in game/ "
+    "instead"
+)
 
 _WINDOWS_RESERVED = frozenset(
     {"CON", "PRN", "AUX", "NUL"}
@@ -116,7 +124,15 @@ def _looks_already_unpacked(root: Path) -> bool:
             continue
         for depth in (0, 1):
             try:
-                entries = os.scandir(base) if depth == 0 else _scandir_children(base)
+                if depth == 0:
+                    # Materialised inside the ``with``: the loop below returns early on
+                    # the answers it is looking for, and a partly-consumed scandir
+                    # iterator that is never closed leaks a directory handle (it shows
+                    # up as a ResourceWarning under ``-W error``).
+                    with os.scandir(base) as scanned:
+                        entries = list(scanned)
+                else:
+                    entries = _scandir_children(base)
             except OSError:  # pragma: no cover - unreadable tree
                 continue
             for entry in entries:
@@ -202,9 +218,10 @@ def _safe_output_root(game_root: Path) -> Path:
     """Where extraction defaults to, guaranteed outside the loaded game directory.
 
     The caller may point ``--game`` at the base directory *or* straight at ``game``
-    (or at ``renpy``).  Defaulting to ``<game_root>/extracted_files`` drops scripts
-    inside ``game/`` in the second case, where Ren'Py will load them -- and a second
-    copy of a script is exactly what stops a game from starting.
+    (or at ``renpy``).  The default output is ``./extracted/<game folder>`` now, which is
+    unaffected by that, but a caller may still be *running* from inside ``game/``:
+    extracting there would put a second copy of the scripts where Ren'Py loads them, and
+    a second copy of a script is exactly what stops a game from starting.
     """
     game_dir = _renpy_game_dir(game_root)
     if game_dir is not None and (game_root == game_dir or game_dir in game_root.parents):
@@ -290,7 +307,13 @@ def discover_game_root(start: Path) -> tuple[Path, Path, list[Path]]:
         "found no .rpa/.rpi archive looking in "
         + ", ".join(str(path) for path in candidates[:5])
         + ("..." if len(candidates) > 5 else "")
-        + ". Pass --game pointing at the game's root directory."
+        + ".\n"
+        "  Those two are only the stock extensions. A game that renames its archives "
+        "-- one ships .blend, another .dll -- is still read, but only through its own "
+        "renpy/loader.py, so this is not proof that the game is unpacked or that the "
+        "path is wrong.\n"
+        "  Pass --game pointing at the game's root directory (the one holding renpy/ "
+        "and game/)."
     )
 
 
@@ -674,8 +697,8 @@ class Reader:
         """Tell the shimmed ``renpy.config`` where the game's files live.
 
         ``loader.load()`` resolves a name through ``transfn``, which joins
-        ``config.basedir`` and ``config.searchpath``.  Without this, reading a loose
-        file fails with ``FileNotFoundError`` even though the file is right there.
+        ``config.basedir`` and ``config.searchpath``, which the loader reads while
+    resolving names.
         """
         renpy = self.namespace.get("renpy")
         config = getattr(renpy, "config", None)
@@ -821,39 +844,6 @@ class Reader:
         if handle is not None:
             return handle
         return load_split_entry(self.namespace["archives"], name)
-
-    def load_loose(self, name: str) -> bytes | None:
-        """Read a file that sits on disk, using the game's own resolution.
-
-        Goes through ``loader.load()`` rather than opening the path directly: that
-        applies the game's prefix rules and consults the same callback list the game
-        uses, so the bytes are what the game would actually see.
-
-        ``tl=False`` asks for the base file rather than a translation, which also
-        keeps the call off ``renpy.game`` (the shim cannot synthesise a full
-        runtime).  The loader raises instead of returning ``None`` when nothing
-        matches, hence the conversion.
-        """
-        loader = self.namespace.get("load")
-        if loader is None:
-            return None
-        try:
-            handle = loader(name, tl=False)
-        except TypeError:
-            # An older loader without the ``tl`` parameter.
-            try:
-                handle = loader(name)
-            except Exception:
-                return None
-        except Exception:
-            return None
-        try:
-            return handle.read()
-        finally:
-            try:
-                handle.close()
-            except Exception:  # pragma: no cover - best effort
-                pass
 
 
 def load_split_entry(archives, name: str) -> io.BufferedReader | None:
@@ -1049,10 +1039,6 @@ class ArchiveEntry:
     declared_size: int = 0
     #: Absolute output path, filled in by the runtime extractor.
     destination: Path | None = None
-    #: True when this file sits on disk rather than inside an archive.  Loose
-    #: files are read through the loader too, just without the archive step.
-    loose: bool = False
-
     @property
     def suffix(self) -> Path:
         return Path(self.name).suffix.lower()
@@ -1186,8 +1172,6 @@ class _Progress:
 #: ``add()`` returns early for these two prefixes, so they never enter the game's
 #: own index: ``cache/`` holds Ren'Py's build/reload caches and ``saves/`` holds the
 #: player's save data.  Excluding them keeps "export what the loader exports" true.
-_LOOSE_EXCLUDED_PREFIXES = ("cache/", "saves/")
-
 
 class Unpacker:
     """Extracts every archive member of one game."""
@@ -1208,11 +1192,10 @@ class Unpacker:
         runtime: bool = False,
         runtime_python: Path | None = None,
         runtime_batch_bytes: int = DEFAULT_BATCH_BYTES,
-        include_loose: bool = False,
         inject: bool = False,
         inject_keep_script: bool = False,
     ):
-        self.game_root = Path(game_root).resolve()
+        self.game_root = (Path(game_root) if game_root else Path.cwd()).resolve()
         self.loader_hint = Path(loader).resolve() if loader else None
         self.output = Path(output) if output else None
         self.jobs = max(1, int(jobs))
@@ -1235,13 +1218,11 @@ class Unpacker:
             )
         self.runtime_python = Path(runtime_python) if runtime_python else None
         self.runtime_batch_bytes = max(1, int(runtime_batch_bytes))
-        self.include_loose = bool(include_loose)
 
         self.archive_dir: Path | None = None
         self.archives: list[Path] = []
         self.unsupported_archives: list[Path] = []
         self.skipped_index_entries: list[str] = []
-        self.loose_count = 0
         self.entries: list[ArchiveEntry] = []
         self.reader: Reader | None = None
         self.external: ExternalRuntime | None = None
@@ -1278,13 +1259,10 @@ class Unpacker:
                 # loaded, source or bytecode.  That is exactly what lets it handle
                 # builds that ship only loader.pyc, so it must not fall through to
                 # the loader-based diagnostics below.
-                root = self._loose_game_root()
-                self.game_root = root
-                self.archive_dir = self._game_content_dir() or root
+                self.archive_dir = self._game_content_dir() or self.game_root
                 self.archives = []
             else:
-                # Raises for a genuine dead end, but accepts an archive-less game
-                # when --include-loose is set.
+                # Raises for a genuine dead end.
                 root = self._nothing_to_do_error(first_error)
                 self.game_root = root
                 self.archive_dir = self._game_content_dir() or root
@@ -1306,32 +1284,21 @@ class Unpacker:
         # what is really a wrong-loader problem.
         find_loader(self.game_root, self.loader_hint)
 
-    def _loose_game_root(self) -> Path:
-        """The game root to use when there are no archives to find it by."""
-        for candidate in [self.game_root, *self.game_root.parents]:
-            if find_game_loader(candidate) is not None:
-                return candidate
-        return self.game_root
-
     def _nothing_to_do_error(self, original: UnpackError) -> Path:
         """Resolve the game root, or raise explaining why nothing can be done.
 
-        Returns a *root* rather than raising in the one case where there genuinely
-        is work to do: an already-unpacked game with ``--include-loose`` set, where
-        the loose files are the payload.  Otherwise raises, distinguishing "already
-        unpacked" from "could not find the archives" -- the first is an answer, not a
-        failure, and must not read as "your --game path is wrong".
+        Raises, distinguishing "already unpacked" from "could not find the
+        archives": the first is an answer, not a failure, and must not read as
+        "your --game path is wrong".
         """
         if _looks_already_unpacked(self.game_root):
-            if self.include_loose:
-                return self._loose_game_root()
             raise UnpackError(
-                f"{self.game_root} appears to be already unpacked: its scripts and "
+                f"{NO_ARCHIVES_NOTICE}.\n"
+                f"  {self.game_root} appears to be already unpacked: its scripts and "
                 f"assets are plain files on disk (.rpy/.rpyc/.webp/.ogg/...) rather "
                 f"than inside an archive. There is nothing to unpack.\n"
                 f"  Looked for archives with extensions: "
                 f"{', '.join(ARCHIVE_SUFFIXES)}\n"
-                f"  Re-run with --include-loose to copy the loose files anyway."
             )
         raise self._no_archives_error(original)
 
@@ -1417,9 +1384,19 @@ class Unpacker:
     def output_dir(self) -> Path:
         if self.output is not None:
             return self.output
-        # Derived from the structural game directory, so that pointing --game at
-        # `game` itself cannot default the output into the directory Ren'Py loads.
-        return _safe_output_root(self.game_root) / "extracted_files"
+        # An ``extracted/`` working directory in the current directory, one folder per
+        # game: several games can be unpacked without colliding, and nothing lands in
+        # the game's own tree.  The environment backend depends on that second part,
+        # because the game it captures is not necessarily the one that was asked for.
+        root = _safe_output_root(self.game_root)
+        base = Path.cwd() / "extracted"
+        content = self._game_content_dir()
+        if content is not None and (base == content or content in base.parents):
+            # Running from inside the directory Ren'Py scans.  Extracting there would
+            # put a second copy of the scripts where the game loads them, so fall back
+            # to the game's own root, which is never the scanned directory.
+            base = root / "extracted"
+        return base / root.name
 
     def load_reader(self) -> ExtractionResult | None:
         """Bring up a reader: the static one by default, the live one if asked."""
@@ -1476,73 +1453,17 @@ class Unpacker:
 
         if self.archives:
             self.reader.index_archives(self.archives)
-        # No archives is a valid state under --include-loose: the loose files are
-        # the payload, and index_archives() would (correctly) complain about an
-        # empty list.
+        # index_archives() would (correctly) complain about an empty list, and there
+        # is nothing to index anyway: a release with no archive has nothing to read.
         self._collect_entries()
         return result
 
     def _game_content_dir(self) -> Path | None:
-        """The directory Ren'Py loads content from, for enumerating loose files."""
+        """The directory Ren'Py loads content from (``game/``, or the root itself)."""
         candidate = self.game_root / "game"
         if candidate.is_dir():
             return candidate
         return self.game_root if self.game_root.is_dir() else None
-
-    def _loose_entries(self) -> list[ArchiveEntry]:
-        """Files sitting on disk, obtained from the loader itself.
-
-        Asked of the game's ``loader.walkdir`` rather than guessed: Ren'Py is the
-        authority on which loose files are game content.  The two prefixes it
-        excludes from its own index are excluded here too, so what comes out is what
-        the loader would actually load -- ``cache/`` is Ren'Py's build/reload cache
-        and ``saves/`` is the player's save data, and neither is game content.
-
-        (``loader.game_files`` would be the other candidate, but ``scandirfiles``
-        merges loose files and archive members into one list, which loses the
-        distinction this needs to pick the right read path.)
-        """
-        if self.reader is None:
-            return []
-        content_dir = self._game_content_dir()
-        if content_dir is None:
-            return []
-
-        namespace = self.reader.namespace
-        walkdir = namespace.get("walkdir")
-        found: list[ArchiveEntry] = []
-
-        if walkdir is not None:
-            try:
-                names = list(walkdir(str(content_dir)))
-            except Exception as exc:  # pragma: no cover - defensive
-                raise UnpackError(
-                    f"the game's own walkdir() failed on {content_dir}: {exc}"
-                ) from exc
-        else:  # pragma: no cover - a loader without walkdir
-            names = [
-                path.relative_to(content_dir).as_posix()
-                for path in content_dir.rglob("*")
-                if path.is_file()
-            ]
-
-        for name in names:
-            if not name or name.startswith(_LOOSE_EXCLUDED_PREFIXES):
-                continue
-            path = content_dir / name
-            try:
-                size = path.stat().st_size
-            except OSError:
-                continue
-            found.append(
-                ArchiveEntry(
-                    name=name,
-                    archive=path,
-                    declared_size=size,
-                    loose=True,
-                )
-            )
-        return found
 
     def _load_runtime_reader(self) -> None:
         """Ask the game's own Ren'Py runtime for its archive index.
@@ -1584,25 +1505,10 @@ class Unpacker:
         return None
 
     def _collect_entries(self) -> None:
-        """Flatten what the game can load into a deduplicated, sorted entry list.
-
-        Archive members always; loose files as well when ``--include-loose`` is set,
-        in which case they are listed **first** because that is the order the game
-        resolves them.  Keeping a single entry per name means a loose file correctly
-        shadows the archived copy of the same name.
-        """
+        """Flatten the archive index into a deduplicated, sorted entry list."""
         entries: list[ArchiveEntry] = []
         seen: set[str] = set()
         skipped: list[str] = []
-        loose_count = 0
-
-        if self.include_loose:
-            for entry in self._loose_entries():
-                if entry.name in seen:
-                    continue
-                seen.add(entry.name)
-                entries.append(entry)
-                loose_count += 1
 
         for archive_path, index in self.reader.namespace["archives"]:
             for name in index:
@@ -1627,7 +1533,6 @@ class Unpacker:
                 entries.append(ArchiveEntry(name=name, archive=Path(archive_path)))
 
         self.skipped_index_entries = skipped
-        self.loose_count = loose_count
         entries.sort(key=lambda entry: entry.name)
         self.entries = entries
 
@@ -1796,19 +1701,11 @@ class Unpacker:
 
 
 def _read_entry(reader: Reader, entry: ArchiveEntry) -> bytes:
-    """Read one file in full, through the game's own loader either way.
+    """Read one file in full, through the game's own loader.
 
-    Loose files go through ``loader.load()`` (which resolves prefixes and reads
-    from disk) and archive members through ``load_from_archive()``.  Both are the
-    game's own code; the only difference is that a loose file has no decryption
-    step, because it never went through an archive.
+    Archive members go through ``load_from_archive()``: the game's own code, which
+    is where any decryption lives.
     """
-    if entry.loose:
-        data = reader.load_loose(entry.name)
-        if data is None:
-            raise UnpackError("the game's loader could not read this file from disk")
-        return data
-
     handle = reader.load(entry.name)
     if handle is None:
         raise UnpackError("no archive index provides this file")
@@ -1952,7 +1849,10 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--game",
         type=Path,
-        default=Path.cwd(),
+        # ``None`` rather than the working directory, so that --env can tell "no game
+        # named" (accept whatever launches) from "this game".  Everything else resolves
+        # it to the working directory below, exactly as before.
+        default=None,
         help="game root directory (default: current directory, then walk upwards)",
     )
     parser.add_argument(
@@ -1968,7 +1868,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
         "--output",
         type=Path,
         default=None,
-        help="output directory (default: <game>/extracted_files)",
+        help="output directory (default: ./extracted/<game folder>)",
     )
     parser.add_argument(
         "-j",
@@ -2043,18 +1943,66 @@ def build_arg_parser() -> argparse.ArgumentParser:
         help="peak read-batch size for --runtime (default: %(default)s)",
     )
     parser.add_argument(
-        "--include-loose",
+        "--no-prompt",
         action="store_true",
-        help="also copy files that sit on disk rather than inside an archive. They "
-        "are read through the game's own loader as well -- there is simply no "
-        "decryption step. Works on a game with no archives at all.",
+        help="never ask questions: they are only shown when the tool is run with no "
+        "arguments at all on a terminal",
+    )
+    parser.add_argument(
+        "--inject-no-launch",
+        action="store_true",
+        help="with --inject: write the script into game/ but do not start the game "
+        "yourself. Launch it (from Steam, say), then run --inject-cleanup to see what "
+        "it extracted and remove the script",
+    )
+    parser.add_argument(
+        "--inject-cleanup",
+        action="store_true",
+        help="fallback for a manual --inject run: report what it extracted and remove "
+        "the generated script from game/, for when the script could not remove itself",
+    )
+    parser.add_argument(
+        "--env-launch",
+        action="store_true",
+        help="start the game once ourselves with the extension on its search path, "
+        "instead of waiting for a launch from Steam. Nothing persistent is changed: "
+        "the three variables go into that one child process, the game extracts and "
+        "exits by itself before any window appears",
+    )
+    parser.add_argument(
+        "--env",
+        action="store_true",
+        help="prepare the no-write backend: install a Ren'Py extension and point the "
+        "*user-level* "
+        "RENPY_SEARCHPATH, so a game started from Steam decrypts itself through its "
+        "own loader and quits before any window appears. Nothing is written into the "
+        "game, and the extension restores the environment when it finishes. Restart Steam "
+        "after installing.",
+    )
+    parser.add_argument(
+        "--unset-env",
+        action="store_true",
+        help="undo --env: put the user-level environment variables back the way they "
+        "were and stop the extension from being loaded again",
+    )
+    parser.add_argument(
+        "--wait",
+        nargs="?",
+        type=float,
+        const=900.0,
+        default=None,
+        metavar="SECONDS",
+        help="with --env, block until the game has extracted through its own loader "
+        "and report the result (default: %(const)s seconds)",
     )
     parser.add_argument(
         "--inject",
         action="store_true",
         help="let the game unpack itself: adds a generated .rpy to game/, runs the "
         "game once, then removes what it added. The most capable backend (works "
-        "even when only loader.pyc ships) but needs a writable game directory.",
+        "even when only loader.pyc ships). It does write into game/, so use it "
+        "where nothing verifies file integrity -- a launcher that checks or "
+        "restores the game files will flag or undo it.",
     )
     parser.add_argument(
         "--inject-keep-script",
@@ -2093,6 +2041,63 @@ def _refuse_inject_with_plan(args) -> int | None:
     return 2
 
 
+
+def _run_inject_cleanup(args) -> int:
+    """Report what a manually launched ``--inject`` run extracted, then remove it."""
+    from .inject import Injector
+    from .runtime import discover_runtime
+
+    game = Path(args.game) if args.game else Path.cwd()
+    output = args.output
+    if output is None:
+        # The same default the manual run used, so its manifest is found again.
+        output = Path.cwd() / "extracted" / game.resolve().name
+
+    try:
+        layout = discover_runtime(game)
+    except UnpackError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+
+    injector = Injector(layout, output)
+    result = injector.collect()
+
+    print()
+    print("Archive reader: injected script (cleanup)")
+    print(f"  game root      : {layout.game_root}")
+    print(f"  script in game/: {injector.SCRIPT_NAME}")
+    print(f"  output         : {injector.output}")
+    print(f"  scratch        : {injector._scratch_dir()}")
+
+    if not injector.manifest_path().is_file():
+        print(
+            "\nno manifest yet: the game has not run through this script, so nothing "
+            "was\n  extracted.  Launch the game first, or just let this remove the "
+            "script."
+        )
+    else:
+        print(
+            f"\nextracted {result.ok} file(s) ({format_size(result.bytes_written)}), "
+            f"skipped {result.skipped}, failed {result.failed + result.missing}"
+        )
+        if result.fatal:
+            print(f"\nthe script failed inside the game:\n{result.fatal}", file=sys.stderr)
+
+    leftovers = injector.cleanup()
+    if leftovers:
+        print("\nwarning: these could not be removed; delete them by hand:")
+        for path in leftovers:
+            print(f"  {path}")
+    else:
+        print("the generated script was removed from the game directory")
+
+    if result.failures:
+        for name, error in result.failures[:20]:
+            print(f"  {name}: {error}")
+        return 1
+    return 0
+
+
 def _run_inject(unpacker: Unpacker, args) -> int:
     """Drive the ``--inject`` backend and report on it."""
     refusal = _refuse_inject_with_plan(args)
@@ -2111,6 +2116,20 @@ def _run_inject(unpacker: Unpacker, args) -> int:
     print(f"  output         : {injector.output}")
     print(f"  script in game/: {injector.SCRIPT_NAME}")
 
+    if args.inject_no_launch:
+        # The manual path: the script is in place, and the game is started by whoever
+        # owns the launch (Steam, a shortcut, the player).
+        injector.prepare()
+        print("\nthe tool did not start the game.  The script is in place:")
+        print(f"  {injector.script_path()}")
+        print("  1. launch the game yourself -- from Steam, or however it is normally")
+        print("     started.  It extracts and quits before any window appears.")
+        print(f"  2. extraction goes to: {injector.output}")
+        print("  3. the script removes itself once it has extracted.  If it could")
+        print("     not (or the game never ran), --inject-cleanup reports what it")
+        print("     extracted and removes it by hand.")
+        return 0
+
     print("\nrunning the game once (it exits before playing; no window should appear)...")
     try:
         outcome = unpacker.run_inject()
@@ -2124,6 +2143,15 @@ def _run_inject(unpacker: Unpacker, args) -> int:
         f"extracted {outcome.ok} file(s) ({format_size(outcome.bytes_written)}), "
         f"skipped {outcome.skipped}, failed {outcome.failed + outcome.missing}"
     )
+    if outcome.archives == 0:
+        # The injected script looked and found nothing to index.  Without this the
+        # summary is "extracted 0 file(s)", which reads like a failure of this tool
+        # rather than like a property of the release.
+        print(f"\n{NO_ARCHIVES_NOTICE}")
+        print(
+            "  loose files stay where they are; copy the game/ folder if you want "
+            "them"
+        )
     if outcome.leftovers:
         print("\nwarning: these could not be removed; delete them by hand:")
         for path in outcome.leftovers:
@@ -2191,8 +2219,41 @@ def _warn_if_inside_game_dir(unpacker: Unpacker, entries) -> str | None:
 
 
 def main(argv: list[str] | None = None) -> int:
+    if argv is None:
+        argv = sys.argv[1:]
+
+    # Nothing on the command line, on a terminal: ask instead of guessing.  Piped or
+    # scripted use keeps the old behaviour (find the game from the working directory),
+    # and passing --no-prompt skips the questions on a terminal too -- its mere
+    # presence makes the argument list non-empty.
+    if not argv and sys.stdin.isatty() and sys.stdout.isatty():
+        from .wizard import run as run_wizard
+
+        argv = run_wizard()
+        if argv is None:
+            return 0
+
     parser = build_arg_parser()
     args = parser.parse_args(argv)
+
+    # --env / --unset-env never look at the game's archives: they set up (or undo) the
+    # user-level environment that makes a Steam launch decrypt itself.
+    if args.inject_cleanup:
+        from .core import _run_inject_cleanup
+
+        return _run_inject_cleanup(args)
+
+    if args.env or args.unset_env or args.env_launch:
+        from .env import cli as env_cli
+
+        return env_cli(
+            do_env=args.env,
+            do_unset_env=args.unset_env,
+            do_env_launch=args.env_launch,
+            game=args.game,
+            output=args.output,
+            wait=args.wait,
+        )
 
     # Plan-only requests are answered before anything is discovered, so an
     # incompatible combination is reported as such rather than as whichever setup
@@ -2216,7 +2277,6 @@ def main(argv: list[str] | None = None) -> int:
             runtime=args.runtime,
             runtime_python=args.runtime_python,
             runtime_batch_bytes=args.runtime_batch_mb * 1024 * 1024,
-            include_loose=args.include_loose,
             inject=args.inject,
             inject_keep_script=args.inject_keep_script,
         )
@@ -2264,6 +2324,11 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.inject:
         return _run_inject(unpacker, args)
+
+    if not unpacker.archives and not unpacker.use_runtime:
+        # The static reader is driven entirely by this list, so an empty one really
+        # does mean the release has no archives, rather than that the search failed.
+        print(f"\n{NO_ARCHIVES_NOTICE}")
 
     print()
     print(describe_extraction(unpacker))
