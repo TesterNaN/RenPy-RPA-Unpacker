@@ -206,10 +206,11 @@ def install(game_root: Path | None, output: Path) -> InstallResult:
         "",
         "  1. Start the game -- double-click it, or launch it from whatever store or",
         "     launcher you use.  A launcher that is *already running* hands down the",
-        "     running will not see this.",
+        "     environment it was started with, so restart it -- or simply start the",
+        "     game directly.",
         "  2. Launch "
         + (f"{target.name!r}" if target else "the game you want")
-        + " from Steam.  It extracts through its own loader and quits before any",
+        + ".  It extracts through its own loader and quits before any",
         "     window appears."
         + ("  Any other Ren'Py game is left alone." if target
            else "  Only the first one does: this is a one-shot."),
