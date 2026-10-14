@@ -92,7 +92,7 @@ class TestQuestions(WizardCase):
         root = self.make_game()
         self.assertIn("--runtime", self.run_wizard([str(root), "runtime", "", ""]))
 
-    def test_env_can_be_launched_by_the_tool_or_from_steam(self):
+    def test_env_can_be_launched_by_the_tool_or_by_a_launcher(self):
         root = self.make_game()
         quick = self.run_wizard([str(root), "4", "1", "", ""])
         self.assertIn("--env-launch", quick)
@@ -103,7 +103,7 @@ class TestQuestions(WizardCase):
         self.assertIn("--env", steam)
         self.assertNotIn("--env-launch", steam)
         self.assertIn("--wait", steam)
-        self.assertIn("重启 Steam", self.text)
+        self.assertIn("已经开着的启动器", self.text)
 
     def test_inject_asks_who_launches_and_manual_skips_the_launch(self):
         root = self.make_game()

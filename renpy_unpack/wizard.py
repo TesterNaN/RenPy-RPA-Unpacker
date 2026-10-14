@@ -20,7 +20,7 @@ METHODS = (
      "只适合没有文件完整性校验的环境"),
     ("env", "4", "--env",
      "在用户级 RENPY_SEARCHPATH 上挂一个 Ren'Py 扩展，让游戏自己解包并退出——可以由工具"
-     "直接启动一次游戏，也可以等你从 Steam 启动；游戏目录一个字节都不写，所以"
+     "直接启动一次游戏，也可以等你自己启动（商店/启动器或双击）；游戏目录一个字节都不写，所以"
      "**完全绕过文件完整性/篡改检查**（--inject 会写 game/，只有在没有校验的环境才安全）"),
 )
 
@@ -130,7 +130,7 @@ _NEXT_STEPS = {
     ],
     "inject-manual": [
         "脚本已经放好，工具**不会**替你启动游戏：",
-        "  1. 你自己启动游戏（点 Steam、快捷方式，怎么方便怎么来）。它会解包并在出窗口前退出。",
+        "  1. 你自己启动游戏（商店/启动器、快捷方式、直接双击，怎么方便怎么来）。它会解包并在出窗口前退出。",
         "  2. 解出来的文件在输出目录里。",
         "  3. 脚本解包成功后**会把自己删掉**，不会给下次启动留东西。万一是它没能删掉"
         "（或游戏根本没跑起来），运行 `--inject-cleanup` 它会汇报解出了什么并手动删掉。",
@@ -139,11 +139,12 @@ _NEXT_STEPS = {
         "工具会直接启动一次游戏：它在出窗口之前就解包并自行退出。",
         "整个过程不写游戏目录、也不改任何系统设置——三个环境变量只传给这一个子进程。",
     ],
-    "env-steam": [
-        "这种方式只能由你启动，工具不会碰游戏进程：",
+    "env-launcher": [
+        "这种方式由你自己启动游戏，工具不会碰游戏进程：",
         "  它不写游戏目录，所以启动器的文件校验看不到任何改动。",
-        "  1. 重启 Steam（它把启动那一刻的环境传给游戏；趁它没运行时设置最省事）。",
-        "  2. 从 Steam 正常启动游戏——它用自己的 loader 解包，并在出窗口前自行退出。",
+        "  1. 启动游戏——直接双击，或从任何商店/启动器（Steam、Epic、GOG Galaxy、itch.io…）。",
+        "     已经开着的启动器会把它启动时的旧环境传下去：重启它，或者干脆直接启动游戏。",
+        "  2. 它会用自己的 loader 解包，并在出窗口前自行退出。",
         "  3. 完事运行 `--unset-env` 收尾（正常情况下扩展解密成功后已经自己撤了）。",
     ],
 }
@@ -207,7 +208,7 @@ def run(*, input_fn=input, output=sys.stdout):
                 _write(output, "  请输入 1、2、3 或 4")
 
         if choice == "env" and sys.platform != "win32":
-            _write(output, "  --env 只支持 Windows：它依赖 Steam 传给游戏的用户级环境变量")
+            _write(output, "  这一条（等你启动那一种）只支持 Windows：它依赖用户级环境变量（注册表）")
             continue
         if choice == "inject" and not os.access(root, os.W_OK):
             _write(output, "  game/ 现在不可写，而 --inject 需要往里面放脚本")
@@ -220,7 +221,7 @@ def run(*, input_fn=input, output=sys.stdout):
         picked = _ask_choice(
             "游戏由谁启动？",
             [("1", "由工具启动一次（默认）", "跑完立刻汇报结果，最省事"),
-             ("2", "我手动启动", "工具只把脚本放好，你自己启动（比如从 Steam）；"
+             ("2", "我手动启动", "工具只把脚本放好，你自己启动（商店/启动器或双击）；"
                                 "脚本解包完会**自己删掉**，万一没删掉才需要 --inject-cleanup")],
             default="1", input_fn=input_fn, output=output)
         if picked is None:
@@ -233,13 +234,14 @@ def run(*, input_fn=input, output=sys.stdout):
         picked = _ask_choice(
             "游戏由谁启动？",
             [("1", "由工具启动一次（推荐）",
-              "工具直接启动游戏，跑完立刻汇报；不改任何系统设置，也不用重启 Steam"),
-             ("2", "我手动启动（从 Steam）",
-              "设好用户级环境变量，你重启 Steam 后再启动游戏；适合只能由 Steam 启动的情况")],
+              "工具直接启动游戏，跑完立刻汇报；不改任何系统设置，也不用重启启动器"),
+             ("2", "我手动启动",
+              "设好用户级环境变量，你自己启动游戏（已经开着的启动器要重启一下）；"
+              "适合只能由商店/启动器启动的情况")],
             default="1", input_fn=input_fn, output=output)
         if picked is None:
             return None
-        launch = "auto" if picked == "1" else "steam"
+        launch = "auto" if picked == "1" else "launcher"
 
     # -- 4. 解到哪 ---------------------------------------------------------
     _write(output)
@@ -263,7 +265,7 @@ def run(*, input_fn=input, output=sys.stdout):
 
     # -- 5. 值得单独问的两个选项 -------------------------------------------
     wait = None
-    if choice == "env" and launch == "steam":
+    if choice == "env" and launch == "launcher":
         wait_answer = _ask_yes_no("要不要在这里等它解完并汇报结果？", default=True,
                                   input_fn=input_fn, output=output)
         if wait_answer is None:
@@ -295,7 +297,7 @@ def run(*, input_fn=input, output=sys.stdout):
     if choice == "inject":
         steps_key = "inject-manual" if launch == "manual" else "inject-auto"
     elif choice == "env":
-        steps_key = "env-launch" if launch == "auto" else "env-steam"
+        steps_key = "env-launch" if launch == "auto" else "env-launcher"
     _write(output, "说明：")
     for line in _NEXT_STEPS[steps_key]:
         _write(output, "  " + line)

@@ -1952,7 +1952,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
         "--inject-no-launch",
         action="store_true",
         help="with --inject: write the script into game/ but do not start the game "
-        "yourself. Launch it (from Steam, say), then run --inject-cleanup to see what "
+        "yourself.  Launch it however you normally do, then run --inject-cleanup to see what "
         "it extracted and remove the script",
     )
     parser.add_argument(
@@ -1965,7 +1965,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
         "--env-launch",
         action="store_true",
         help="start the game once ourselves with the extension on its search path, "
-        "instead of waiting for a launch from Steam. Nothing persistent is changed: "
+        "instead of waiting for you to launch it.  Nothing persistent is changed: "
         "the three variables go into that one child process, the game extracts and "
         "exits by itself before any window appears",
     )
@@ -1974,9 +1974,9 @@ def build_arg_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="prepare the no-write backend: install a Ren'Py extension and point the "
         "*user-level* "
-        "RENPY_SEARCHPATH, so a game started from Steam decrypts itself through its "
+        "RENPY_SEARCHPATH, so a game started after that decrypts itself through its "
         "own loader and quits before any window appears. Nothing is written into the "
-        "game, and the extension restores the environment when it finishes. Restart Steam "
+        "game, and the extension restores the environment when it finishes.  A launcher that "
         "after installing.",
     )
     parser.add_argument(
@@ -2118,11 +2118,11 @@ def _run_inject(unpacker: Unpacker, args) -> int:
 
     if args.inject_no_launch:
         # The manual path: the script is in place, and the game is started by whoever
-        # owns the launch (Steam, a shortcut, the player).
+        # owns the launch (a store, a shortcut, the player).
         injector.prepare()
         print("\nthe tool did not start the game.  The script is in place:")
         print(f"  {injector.script_path()}")
-        print("  1. launch the game yourself -- from Steam, or however it is normally")
+        print("  1. launch the game yourself -- however it is normally")
         print("     started.  It extracts and quits before any window appears.")
         print(f"  2. extraction goes to: {injector.output}")
         print("  3. the script removes itself once it has extracted.  If it could")

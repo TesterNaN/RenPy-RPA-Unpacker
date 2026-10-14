@@ -142,7 +142,7 @@ def install(game_root: Path | None, output: Path) -> InstallResult:
     """Write the extension, remember the current environment, then change it.
 
     ``game_root`` may be ``None``, and then the extension accepts *any* Ren'Py game.
-    That is the point of this backend: it is installed before Steam launches anything,
+    That is the point of this backend: it is installed before a launcher starts anything,
     so the game that starts is not necessarily the one that was asked for.
 
     ``output`` is a *base*.  The extension appends a folder named after the game it
@@ -204,8 +204,8 @@ def install(game_root: Path | None, output: Path) -> InstallResult:
     result.lines = [
         "Installed. Nothing was written into the game, and nothing is extracted yet.",
         "",
-        "  1. Restart Steam, or start it if it is not running.  A game inherits the",
-        "     environment Steam itself was started with, so a Steam that is already",
+        "  1. Start the game -- double-click it, or launch it from whatever store or",
+        "     launcher you use.  A launcher that is *already running* hands down the",
         "     running will not see this.",
         "  2. Launch "
         + (f"{target.name!r}" if target else "the game you want")
@@ -269,7 +269,7 @@ def uninstall() -> list:
 
     broadcast_change()
 
-    # The variable is gone, but a Steam still holding the old environment would load
+    # The variable is gone, but a launcher still holding the old environment would load
     # the extension again on the next launch: take the file away as well.
     extension_path().unlink(missing_ok=True)
     (searchpath_dir() / "spent").unlink(missing_ok=True)
@@ -346,7 +346,7 @@ def launch_once(game_root: Path, output: Path, *, timeout: float = 600.0) -> dic
 
     Nothing persistent is touched and nothing is written into the game: the extension
     lives in this tool's own state directory, and the three environment variables go
-    into one child process -- which is exactly what a freshly started Steam hands down.
+    into one child process -- which is what any launcher started after this was set hands down.
     The game exits by itself before any window appears.
     """
     from .runtime import discover_runtime
@@ -510,7 +510,7 @@ def cli(*, do_env: bool = False, do_unset_env: bool = False, do_env_launch: bool
         return 0
 
     print(f"\nwaiting up to {wait:.0f}s for the game to extract through its own loader "
-          f"(launch it from Steam)...", file=out)
+          f"(launch the game)...", file=out)
     summary = wait_for_extraction(wait)
 
     if summary.get("fatal"):
@@ -521,8 +521,8 @@ def cli(*, do_env: bool = False, do_unset_env: bool = False, do_env_launch: bool
 
     if not summary.get("done"):
         print(f"error: no extraction arrived within {wait:.0f}s.", file=err)
-        print("  A game inherits the environment Steam was started with: restart "
-              "Steam, then launch it from Steam.", file=err)
+        print("  A launcher that is already running keeps the environment it was started "
+              "with: restart it, or start the game directly.", file=err)
         for line in read_log(6):
             print("  " + line, file=err)
         return 1
