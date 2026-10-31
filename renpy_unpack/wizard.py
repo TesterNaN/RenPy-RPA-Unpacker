@@ -22,6 +22,10 @@ METHODS = (
      "在用户级 RENPY_SEARCHPATH 上挂一个 Ren'Py 扩展，让游戏自己解包并退出——可以由工具"
      "直接启动一次游戏，也可以等你自己启动（商店/启动器或双击）；游戏目录一个字节都不写，所以"
      "**完全绕过文件完整性/篡改检查**（--inject 会写 game/，只有在没有校验的环境才安全）"),
+    ("hook", "5", "--hook",
+     "照玩家那样启动游戏，然后借它的线程在它自己的解释器里跑 load_from_archive——前四个都被"
+     "构建本身否掉时才用：引擎编译成 renpy.pyd、没有启动脚本、game/ 有清单校验、环境被净化。"
+     "不写游戏目录、不猜格式；仅 Windows + 64 位 + 动态链接 CPython 的构建"),
 )
 
 BY_NUMBER = {number: key for key, number, _label, _help in METHODS}
@@ -109,6 +113,10 @@ def _recommend(root: Path) -> str:
     """按游戏实际带了什么，决定先推荐哪种方式。"""
     if (root / "renpy" / "loader.py").is_file():
         return "static"
+    if (root / "renpy.pyd").is_file():
+        # The engine is compiled: nothing on disk describes the archive format, so the
+        # file-based backends have nothing to read.  Only the in-process backend applies.
+        return "hook"
     if (root / "game" / "renpy" / "loader.py").is_file():
         return "static"
     if any(root.glob("**/loader.pyc")):
@@ -138,6 +146,11 @@ _NEXT_STEPS = {
     "env-launch": [
         "工具会直接启动一次游戏：它在出窗口之前就解包并自行退出。",
         "整个过程不写游戏目录、也不改任何系统设置——三个环境变量只传给这一个子进程。",
+    ],
+    "hook": [
+        "工具会像玩家一样启动游戏，然后在这一局进程里跑解包代码——所以会看到游戏窗口一闪，",
+        "解完就退出；不写游戏目录、不改系统设置。",
+        "如果启动器要求 Steam AppID 才能启动，再补一个 `--steam-appid <ID>`。",
     ],
     "env-launcher": [
         "这种方式由你自己启动游戏，工具不会碰游戏进程：",
@@ -287,6 +300,8 @@ def run(*, input_fn=input, output=sys.stdout):
             arguments.append("--inject-no-launch")
     elif choice == "runtime":
         arguments.append("--runtime")
+    elif choice == "hook":
+        arguments.append("--hook")
 
     _write(output)
     _write(output, "接下来会执行：")

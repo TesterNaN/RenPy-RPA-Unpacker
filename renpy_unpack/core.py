@@ -1996,6 +1996,30 @@ def build_arg_parser() -> argparse.ArgumentParser:
         "and report the result (default: %(const)s seconds)",
     )
     parser.add_argument(
+        "--hook",
+        action="store_true",
+        help="fifth backend: start the game and run the extraction inside its own "
+        "interpreter, through renpy.loader.  For builds where nothing on disk "
+        "describes the format -- a compiled renpy.pyd, a file-manifest check, a "
+        "sanitised environment.  Nothing on disk is modified; the process's import "
+        "table is redirected for one call, then restored.  Windows only, and some "
+        "antivirus products treat it as injection, which it is",
+    )
+    parser.add_argument(
+        "--steam-appid",
+        metavar="ID",
+        help="with --hook: the Steam app id to hand the launcher.  Normally read "
+        "from steamapps/appmanifest_*.acf, but a launcher that talks to Steam exits "
+        "early without one and a cleaned-up library has no manifest",
+    )
+    parser.add_argument(
+        "--diagnose",
+        action="store_true",
+        help="classify the folder instead of extracting: engine shape, archives found "
+        "by content versus by extension, and which backend can work on it, each with "
+        "the reason",
+    )
+    parser.add_argument(
         "--inject",
         action="store_true",
         help="let the game unpack itself: adds a generated .rpy to game/, runs the "
@@ -2243,6 +2267,13 @@ def main(argv: list[str] | None = None) -> int:
 
         return _run_inject_cleanup(args)
 
+    # --diagnose answers "what kind of build is this" before any extraction is planned.
+    if getattr(args, "diagnose", False):
+        from .classify import classify, format_profile
+
+        print(format_profile(classify(Path(args.game) if args.game else Path("."))))
+        return 0
+
     if args.env or args.unset_env or args.env_launch:
         from .env import cli as env_cli
 
@@ -2253,6 +2284,18 @@ def main(argv: list[str] | None = None) -> int:
             game=args.game,
             output=args.output,
             wait=args.wait,
+        )
+
+    # --hook is the fifth backend: nothing on disk is read or written, the game is
+    # started and the work happens inside its interpreter.
+    if getattr(args, "hook", False):
+        from .hook import cli as hook_cli
+
+        return hook_cli(
+            game=args.game,
+            output=args.output,
+            appid=args.steam_appid,
+            quiet=args.quiet,
         )
 
     # Plan-only requests are answered before anything is discovered, so an
